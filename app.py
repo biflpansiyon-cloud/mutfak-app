@@ -6,13 +6,13 @@ import base64
 import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timedelta
 import difflib
 import pandas as pd
 import random
 import re
 
-st.set_page_config(page_title="Mutfak ERP V18", page_icon="📉", layout="wide")
+st.set_page_config(page_title="Mutfak ERP V19", page_icon="📊", layout="wide")
 
 # ==========================================
 # 🔒 GÜVENLİK DUVARI
@@ -53,7 +53,7 @@ def get_gspread_client():
 # ==========================================
 def clean_number(num_str):
     try:
-        clean = re.sub(r'[^\d.,-]', '', str(num_str)) # Eksi işaretine de izin ver
+        clean = re.sub(r'[^\d.,-]', '', str(num_str))
         if not clean: return 0.0
         if clean.count('.') > 1 or clean.count(',') > 1:
              clean = clean.replace('.', '').replace(',', '.')
@@ -132,20 +132,20 @@ def resolve_product_name(ocr_prod, client):
                 if row[2] and row[3]: product_map[turkish_lower(row[2])] = row[3].strip()
         key = turkish_lower(clean_prod)
         if key in product_map: return product_map[key]
-        for k, v in product_map.items():
-            if k in key: return v
         best = find_best_match(clean_prod, list(product_map.keys()), cutoff=0.85)
         if best: return product_map[turkish_lower(best)]
         return clean_prod
     except: return clean_prod
 
 def get_price_database(client):
-    # DİKKAT: Artık 5. Sütun (KALAN KOTA) var
-    # Dönüş yapısı: { "Firma|Urun": {"fiyat": 100, "kota": 50, "row": 2} }
+    # YENİ YAPI: [TEDARİKÇİ, ÜRÜN, FİYAT, PARA_BİRİMİ, TARİH, KOTA, BİRİM]
+    # Fiyat index: 2, Kota index: 5
     price_db = {}
     try:
         sh = client.open(SHEET_NAME)
-        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, cols=6, header=["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "GÜNCELLEME TARİHİ", "KALAN KOTA"])
+        # Başlıkları 7 sütuna çıkardık
+        header = ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"]
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, header)
         data = ws.get_all_values()
         
         for idx, row in enumerate(data):
@@ -155,13 +155,14 @@ def get_price_database(client):
                 urn = row[1].strip()
                 fyt = clean_number(row[2])
                 
-                # Kota sütununu oku (E sütunu = index 4)
                 kota = 0.0
-                if len(row) >= 5:
-                    kota = clean_number(row[4])
+                if len(row) >= 6: kota = clean_number(row[5])
+                
+                kota_birim = ""
+                if len(row) >= 7: kota_birim = row[6].strip()
                 
                 if ted not in price_db: price_db[ted] = {}
-                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "row": idx + 1}
+                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kota_birim, "row": idx + 1}
         return price_db
     except: return {}
 
@@ -186,7 +187,7 @@ def get_full_menu_pool(client):
     except: return []
 
 # ==========================================
-# MODÜL 1: İRSALİYE (KOTA DÜŞÜCÜ)
+# MODÜL 1: İRSALİYE (AYRIŞTIRILMIŞ BİRİM VE TL)
 # ==========================================
 def analyze_receipt_image(image, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -196,10 +197,23 @@ def analyze_receipt_image(image, model_name):
     base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
+    
+    # --- PROMPT GÜNCELLENDİ ---
     prompt = """
-    İrsaliyeyi analiz et. Tedarikçi firmayı bul.
-    ÇIKTI: TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR (Birimli) | BİRİM FİYAT | TOPLAM TUTAR
-    Fiyat yoksa 0 yaz. Markdown kullanma.
+    İrsaliyeyi analiz et.
+    GÖREVLER:
+    1. Tedarikçi firmayı bul.
+    2. Ürünleri kalem kalem çıkar.
+    3. MİKTAR ve BİRİMİ ayır (Örn: "5 KG" -> Miktar: 5, Birim: KG).
+    4. Fiyat yoksa 0 yaz.
+    
+    ÇIKTI FORMATI (Aralara | koy):
+    TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR (Sayı) | BİRİM (KG/L/Adet) | BİRİM FİYAT (Sayı) | TOPLAM TUTAR
+    
+    Örnek:
+    Yılmaz Gıda | 25.11.2025 | Salça | 5 | Teneke | 0 | 0
+    
+    Markdown kullanma. Sadece veriyi ver.
     """
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
     try:
@@ -211,33 +225,38 @@ def analyze_receipt_image(image, model_name):
 def save_receipt_smart(raw_text):
     client, err = get_gspread_client()
     if not client: return False, err
-    
-    # Veritabanını çek
     price_db = get_price_database(client)
     known_companies = list(price_db.keys())
     
     try:
         sh = client.open(SHEET_NAME)
-        # Fiyat anahtarı sekmesine erişim (Kota güncellemek için)
-        price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 6, [])
-        
+        price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
         existing_sheets = {turkish_lower(ws.title): ws for ws in sh.worksheets()}
+        
         firm_data = {}
-        kota_updates = [] # Toplu güncelleme listesi
+        kota_updates = []
         
         for line in raw_text.split('\n'):
             line = line.replace("*", "").strip()
             if "|" in line:
                 parts = [p.strip() for p in line.split('|')]
                 if "TEDARİKÇİ" in parts[0].upper(): continue
-                while len(parts) < 6: parts.append("0")
+                # 7 Sütun bekliyoruz: Tedarikçi, Tarih, Ürün, Miktar, Birim, Fiyat, Tutar
+                while len(parts) < 7: parts.append("0")
                 
                 ocr_raw_name = parts[0]
                 final_firma = resolve_company_name(ocr_raw_name, client, known_companies)
-                tarih, urun, miktar, fiyat, tutar = parts[1], parts[2], parts[3], parts[4], parts[5]
+                
+                tarih = parts[1]
+                urun = parts[2]
+                miktar = parts[3]
+                birim = parts[4].upper() # KG, ADET vs büyük harf
+                fiyat = parts[5]
+                tutar = parts[6]
+                
                 f_val = clean_number(fiyat)
                 final_urun = resolve_product_name(urun, client)
-                m_val = clean_number(miktar) # Gelen miktar
+                m_val = clean_number(miktar)
                 
                 # --- FİYAT VE KOTA OPERASYONU ---
                 if final_firma in price_db:
@@ -247,48 +266,45 @@ def save_receipt_smart(raw_text):
                     if match_prod:
                         db_item = price_db[final_firma][match_prod]
                         
-                        # 1. Fiyat Yoksa Çek
+                        # Fiyat çek
                         if f_val == 0:
                             f_val = db_item['fiyat']
                             fiyat = str(f_val)
                             tutar = f"{m_val * f_val:.2f}"
                         
-                        # 2. İsmi Standartlaştır
                         final_urun = match_prod
                         
-                        # 3. KOTADAN DÜŞ (İrsaliye = Harcama)
+                        # KOTA DÜŞ (Eksiye gidebilir)
                         current_kota = db_item['kota']
                         new_kota = current_kota - m_val
                         row_num = db_item['row']
                         
-                        # Güncellemeyi listeye ekle (Hücre E{row})
-                        kota_updates.append({'range': f'E{row_num}', 'values': [[new_kota]]})
+                        # Kotayı (F sütunu) güncelle
+                        kota_updates.append({'range': f'F{row_num}', 'values': [[new_kota]]})
                 
                 if final_firma not in firm_data: firm_data[final_firma] = []
-                firm_data[final_firma].append([tarih, final_urun, miktar, fiyat, tutar])
+                # Kayıt: Tarih, Ürün, Miktar, Birim, Fiyat, TL, Tutar
+                firm_data[final_firma].append([tarih, final_urun, miktar, birim, fiyat, "TL", tutar])
         
-        # Google Sheets'e Yazma İşlemleri
         msg = []
-        # 1. İrsaliyeleri Yaz
         for firma, rows in firm_data.items():
             fn = turkish_lower(firma)
             if fn in existing_sheets: ws = existing_sheets[fn]
             else:
-                ws = get_or_create_worksheet(sh, firma, 1000, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM FİYAT", "TOPLAM TUTAR"])
+                ws = get_or_create_worksheet(sh, firma, 1000, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "PARA BİRİMİ", "TOPLAM TUTAR"])
                 existing_sheets[fn] = ws
             ws.append_rows(rows)
             msg.append(f"{firma}: {len(rows)}")
             
-        # 2. Kotaları Güncelle (Batch Update)
         if kota_updates:
             price_ws.batch_update(kota_updates)
-            msg.append(f"(Stoklar Güncellendi: {len(kota_updates)} kalem)")
+            msg.append(f"(Stoklar Güncellendi: {len(kota_updates)})")
             
         return True, " | ".join(msg) + " eklendi."
     except Exception as e: return False, str(e)
 
 # ==========================================
-# MODÜL 2: FATURA (KOTA YÜKLEYİCİ)
+# MODÜL 2: FATURA (BİRİM VE KOTA YÜKLEYİCİ)
 # ==========================================
 def analyze_invoice_pdf(uploaded_file, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -297,20 +313,20 @@ def analyze_invoice_pdf(uploaded_file, model_name):
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
+    
+    # --- PROMPT GÜNCELLENDİ ---
     prompt = """
     FATURAYI analiz et.
     1. Tedarikçi Firmayı Bul.
-    2. Kalemleri listele.
-    3. ÖNEMLİ: Hem BİRİM FİYATI hem de TOPLAM MİKTARI (KG/L/Adet) bul.
-       - Eğer "5 Koli x 10 KG" ise Toplam Miktar = 50 KG.
-       - Birim Fiyat her zaman KG/Litre fiyatı olsun.
+    2. Ürünleri listele.
+    3. HESAPLAMA: Birim fiyatı (KG/Litre/Adet) bul.
+    4. Miktarı ve Birimini ayır.
     
-    ÇIKTI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT | FATURA TOPLAM MİKTAR
+    ÇIKTI FORMATI:
+    TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT | ALINAN MİKTAR (Sayı) | BİRİM (KG/L/Adet)
     
     Örnek:
-    Alp Et | Kıyma | 450.00 | 50 KG
-    
-    Markdown kullanma.
+    Alp Et | Kıyma | 450.00 | 50 | KG
     """
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": base64_pdf}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
     try:
@@ -324,23 +340,21 @@ def update_price_list(raw_text):
     if not client: return False, err
     try:
         sh = client.open(SHEET_NAME)
-        # Yeni sütunlu başlık (E Sütunu: KALAN KOTA)
-        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 5, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "GÜNCELLEME TARİHİ", "KALAN KOTA"])
+        # 7 Sütunlu Başlık: TEDARİKÇİ | ÜRÜN | FİYAT | PARA | TARİH | KOTA | BİRİM
+        header = ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"]
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, header)
         
         existing_data = ws.get_all_values()
         product_map = {}
         existing_companies = set()
-        
-        # Veritabanını haritala
         for idx, row in enumerate(existing_data):
             if idx == 0: continue
             if len(row) >= 2:
                 k_firma = turkish_lower(row[0])
                 k_urun = turkish_lower(row[1])
                 
-                # Mevcut kotayı al (Yoksa 0)
                 current_quota = 0.0
-                if len(row) >= 5: current_quota = clean_number(row[4])
+                if len(row) >= 6: current_quota = clean_number(row[5])
                 
                 product_map[f"{k_firma}|{k_urun}"] = {"row": idx + 1, "quota": current_quota}
                 existing_companies.add(row[0])
@@ -355,8 +369,8 @@ def update_price_list(raw_text):
             if "|" in line:
                 parts = [p.strip() for p in line.split('|')]
                 if "TEDARİKÇİ" in parts[0].upper(): continue
-                while len(parts) < 4: parts.append("0") # 4. Sütun Miktar
-                
+                # 5 Sütun bekliyoruz: Tedarikçi, Ürün, Fiyat, Miktar, Birim
+                while len(parts) < 5: parts.append("0")
                 if clean_number(parts[2]) == 0: continue
                 
                 raw_supplier = parts[0]
@@ -364,32 +378,32 @@ def update_price_list(raw_text):
                 raw_prod = parts[1].strip()
                 final_prod = resolve_product_name(raw_prod, client)
                 fiyat = clean_number(parts[2])
-                
-                # Faturadan gelen miktar (KREDİ)
-                gelen_miktar = clean_number(parts[3])
-                
+                miktar = clean_number(parts[3])
+                birim = parts[4].strip().upper()
                 bugun = datetime.now().strftime("%d.%m.%Y")
                 
                 key = f"{turkish_lower(target_supplier)}|{turkish_lower(final_prod)}"
                 
                 if key in product_map:
-                    # GÜNCELLEME: Fiyatı değiş, Kotayı EKLE (Eski + Yeni)
+                    # Güncelle: Fiyat, Tarih ve Kotayı Artır
                     item_data = product_map[key]
                     row_idx = item_data['row']
-                    new_total_quota = item_data['quota'] + gelen_miktar
+                    new_total_quota = item_data['quota'] + miktar
                     
-                    updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]}) # Fiyat
-                    updates_batch.append({'range': f'D{row_idx}', 'values': [[bugun]]}) # Tarih
-                    updates_batch.append({'range': f'E{row_idx}', 'values': [[new_total_quota]]}) # Kota
+                    # C=Fiyat, D=Para, E=Tarih, F=Kota, G=Birim
+                    updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]})
+                    updates_batch.append({'range': f'E{row_idx}', 'values': [[bugun]]})
+                    updates_batch.append({'range': f'F{row_idx}', 'values': [[new_total_quota]]})
+                    updates_batch.append({'range': f'G{row_idx}', 'values': [[birim]]})
                     cnt_upd += 1
                 else:
-                    # YENİ ÜRÜN: Kotası gelen miktar kadar
-                    new_rows_batch.append([target_supplier, final_prod, fiyat, bugun, gelen_miktar])
+                    # Yeni Ekle: Firma, Ürün, Fiyat, TL, Tarih, Kota, Birim
+                    new_rows_batch.append([target_supplier, final_prod, fiyat, "TL", bugun, miktar, birim])
                     cnt_new += 1
         
         if updates_batch: ws.batch_update(updates_batch)
         if new_rows_batch: ws.append_rows(new_rows_batch)
-        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi. (Stoklar artırıldı)"
+        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi."
     except Exception as e: return False, str(e)
 
 # ==========================================
@@ -463,7 +477,7 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
 # ==========================================
 def main():
     with st.sidebar:
-        st.title("Mutfak ERP V18")
+        st.title("Mutfak ERP V19")
         if st.button("🔒 Güvenli Çıkış"):
             st.session_state.clear()
             st.rerun()
@@ -492,7 +506,7 @@ def main():
 
     elif page == "🧾 Fatura & Fiyatlar":
         st.header("🧾 Fiyat & Stok Güncelleme")
-        st.info("Faturadaki miktarlar stok kotasına EKLENİR.")
+        st.info("Fatura miktarları stoka eklenir.")
         pdf = st.file_uploader("PDF Fatura", type=['pdf'])
         if pdf:
             if st.button("Analiz Et"):
@@ -539,9 +553,6 @@ def main():
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 edited.to_excel(writer, sheet_name='Menu', index=False)
-                workbook = writer.book
-                worksheet = writer.sheets['Menu']
-                worksheet.set_column('A:G', 20, workbook.add_format({'num_format': '@'}))
             st.download_button("📥 Excel İndir", output.getvalue(), f"Menu_{aylar[secilen_ay]}.xlsx")
 
 if __name__ == "__main__":

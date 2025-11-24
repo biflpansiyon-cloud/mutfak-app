@@ -2,80 +2,82 @@ import streamlit as st
 from PIL import Image
 import pandas as pd
 from datetime import datetime
-import google.generativeai as genai
+import requests
+import json
+import base64
+import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import json
-import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Mutfak Devriyesi", page_icon="🍅")
 
 # --- BAŞLANGIÇ AYARLARI ---
-def setup_credentials():
+def setup_sheets():
     try:
-        # Google Sheets
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
-        # Gemini API
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        
         return client
     except Exception as e:
         return None
 
-client = setup_credentials()
+client = setup_sheets()
 SHEET_NAME = "Mutfak_Takip"
 
-# --- ZEKİ ANALİZ FONKSİYONU (SİGORTALI) ---
-def analyze_with_fallback(img):
-    """
-    Bu fonksiyon modelleri sırayla dener. 
-    Biri hata verirse diğerine geçer.
-    """
-    # Denenecek modeller listesi (En iyiden en garantiye)
-    models_to_try = [
-        'gemini-1.5-flash',       # Hızlı ve Yeni
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro',         # Güçlü
-        'gemini-pro-vision'       # ESKİ AMA GARANTİ (Resimler için)
-    ]
+# --- DOĞRUDAN REST API FONKSİYONU ---
+def analyze_image_direct_api(image):
+    api_key = st.secrets["GOOGLE_API_KEY"]
     
-    prompt = """
-    Sen bir muhasebe asistanısın. İrsaliye fotoğrafını analiz et.
-    SADECE aşağıdaki JSON formatında veri ver. Başka hiçbir metin yazma.
-    Okuyamadığın sayısal değerlere 0 yaz.
+    # Resmi Base64 formatına çevir (Google'ın anlayacağı dil)
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='JPEG')
+    img_byte_arr = img_byte_arr.getvalue()
+    base64_image = base64.b64encode(img_byte_arr).decode('utf-8')
+
+    # API Adresi (Gemini 1.5 Flash)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
-    [
-      {"Urun": "Urun Adi", "Miktar": "5 KG", "Fiyat": "20 TL", "Tutar": "100 TL"}
-    ]
-    """
+    headers = {'Content-Type': 'application/json'}
     
-    last_error = ""
-    
-    # Modelleri döngüye sok
-    for model_name in models_to_try:
-        try:
-            # Modeli hazırla
-            model = genai.GenerativeModel(model_name)
+    # Gönderilecek Paket
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": """
+                Sen bir muhasebe asistanısın. İrsaliye fotoğrafını analiz et.
+                SADECE aşağıdaki JSON formatında veri ver. Başka hiçbir metin yazma.
+                Okuyamadığın sayısal değerlere 0 yaz.
+                [{"Urun": "Urun Adi", "Miktar": "5 KG", "Fiyat": "20 TL", "Tutar": "100 TL"}]
+                """},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                }
+            ]
+        }]
+    }
+
+    try:
+        # İsteği Gönder
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                # Cevabı ayıkla
+                text_response = result['candidates'][0]['content']['parts'][0]['text']
+                return True, text_response
+            except:
+                return False, "Cevap formatı bozuk: " + str(result)
+        else:
+            return False, f"API Hatası ({response.status_code}): {response.text}"
             
-            # İsteği gönder
-            response = model.generate_content([prompt, img])
-            
-            # Eğer buraya geldiyse çalışmış demektir
-            return True, response.text, model_name
-            
-        except Exception as e:
-            # Hata aldıysak kaydet ve diğer modele geç
-            last_error = str(e)
-            print(f"{model_name} hata verdi, diğerine geçiliyor...")
-            continue
-            
-    # Hiçbiri çalışmazsa
-    return False, f"Tüm modeller denendi ama başarısız oldu. Son hata: {last_error}", "Yok"
+    except Exception as e:
+        return False, f"Bağlantı Hatası: {str(e)}"
 
 def save_to_sheet(json_text):
     if not client:
@@ -102,7 +104,7 @@ def save_to_sheet(json_text):
 
 # --- ARAYÜZ ---
 st.title("🍅 Mutfak İrsaliye Kayıt")
-st.caption("Otomatik Model Değiştiricili Sistem")
+st.caption("Direct REST API Modu")
 
 uploaded_file = st.file_uploader("İrsaliye Fotoğrafı Yükle", type=['jpg', 'png', 'jpeg'])
 
@@ -111,16 +113,16 @@ if uploaded_file:
     st.image(image, caption="Yüklenen Belge", width=300)
     
     if st.button("Analiz Et ve Kaydet", type="primary"):
-        with st.spinner("Yapay zeka modelleri deneniyor..."):
+        with st.spinner("Google API'ye bağlanılıyor..."):
             
-            # 1. Analiz (Yedekli Sistem)
-            success_ai, ai_result, working_model = analyze_with_fallback(image)
+            # 1. Analiz
+            success_ai, result = analyze_image_direct_api(image)
             
             if success_ai:
-                st.toast(f"✅ {working_model} modeli başarıyla okudu!", icon="🤖")
+                st.toast("✅ Yapay Zeka Cevap Verdi!", icon="🤖")
                 
                 # 2. Kayıt
-                success_save, msg = save_to_sheet(ai_result)
+                success_save, msg = save_to_sheet(result)
                 
                 if success_save:
                     st.balloons()
@@ -130,4 +132,4 @@ if uploaded_file:
             else:
                 st.error("❌ Analiz Başarısız Oldu.")
                 with st.expander("Hata Detayı"):
-                    st.write(ai_result)
+                    st.write(result)

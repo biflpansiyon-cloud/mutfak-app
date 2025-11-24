@@ -12,7 +12,7 @@ import pandas as pd
 import random
 import re
 
-st.set_page_config(page_title="Mutfak ERP (Smart Match)", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Mutfak ERP V17.3", page_icon="🎯", layout="wide")
 
 # ==========================================
 # 🔒 GÜVENLİK DUVARI
@@ -79,7 +79,6 @@ def standardize_name(text):
     return " ".join([word.capitalize() for word in cleaned.split()])
 
 def find_best_match(ocr_text, db_list, cutoff=0.6):
-    """ Benzerlik bulucu: Hem ürünler hem firmalar için """
     if not ocr_text: return None
     ocr_key = turkish_lower(ocr_text)
     db_keys = [turkish_lower(p) for p in db_list]
@@ -90,15 +89,12 @@ def find_best_match(ocr_text, db_list, cutoff=0.6):
         return db_list[idx]
     return None
 
-# --- GÜNCELLENMİŞ FİRMA ÇÖZÜCÜ ---
+# --- GÜNCELLENMİŞ: KAPSAMA MANTIKLI FİRMA ÇÖZÜCÜ ---
 def resolve_company_name(ocr_name, client, known_companies=None):
-    """
-    1. AYARLAR sekmesine bakar (Manuel Sözlük).
-    2. Bulamazsa, MEVCUT FİRMA LİSTESİNE (known_companies) bakar ve benzetmeye çalışır.
-    """
     std_name = standardize_name(ocr_name)
+    ocr_lower = turkish_lower(std_name) # Okunan ismin küçük hali (Örn: aren toptan gida pazarlama)
     
-    # 1. AYARLAR Sekmesi Kontrolü
+    # 1. AYARLAR Sekmesi (Sözlük) Kontrolü
     try:
         sh = client.open(SHEET_NAME)
         try:
@@ -106,23 +102,32 @@ def resolve_company_name(ocr_name, client, known_companies=None):
             data = ws.get_all_values()
             alias_map = {}
             for row in data[1:]:
-                if len(row) >= 2: alias_map[turkish_lower(row[0])] = row[1].strip()
+                if len(row) >= 2: 
+                    # Sözlükteki anahtarı (Aren Toptan) ve değeri (Eker) al
+                    key_name = turkish_lower(row[0]).strip()
+                    target_val = row[1].strip()
+                    if key_name: alias_map[key_name] = target_val
             
-            # Tam eşleşme veya Sözlükten Fuzzy Eşleşme
-            key = turkish_lower(std_name)
-            if key in alias_map: return alias_map[key]
+            # A. TAM EŞLEŞME
+            if ocr_lower in alias_map: return alias_map[ocr_lower]
+            
+            # B. İÇİNDE GEÇİYOR MU? (KAPSAMA MANTIĞI - YENİ)
+            # Eğer sözlükteki "aren" kelimesi, okunan "aren toptan gıda"nın içindeyse -> Eşleştir!
+            for key_name, target_val in alias_map.items():
+                if key_name in ocr_lower: 
+                    return target_val
+            
+            # C. FUZZY MATCH (Yedek)
             best_alias = find_best_match(std_name, list(alias_map.keys()), cutoff=0.7)
             if best_alias: return alias_map[turkish_lower(best_alias)]
             
         except gspread.WorksheetNotFound: pass
     except: pass
 
-    # 2. Mevcut Veritabanı Kontrolü (Sizin istediğiniz özellik)
-    # Eğer veritabanında "Başar Gıda" varsa ve gelen "Başar Gıda Zati..." ise eşleştir.
+    # 2. Mevcut Veritabanı Kontrolü
     if known_companies:
-        best_db_match = find_best_match(std_name, known_companies, cutoff=0.6) # %60 benzerlik yeter
-        if best_db_match:
-            return best_db_match
+        best_db_match = find_best_match(std_name, known_companies, cutoff=0.6)
+        if best_db_match: return best_db_match
 
     return std_name
 
@@ -139,6 +144,11 @@ def resolve_product_name(ocr_prod, client):
                 if row[2] and row[3]: product_map[turkish_lower(row[2])] = row[3].strip()
         key = turkish_lower(clean_prod)
         if key in product_map: return product_map[key]
+        
+        # Kapsama mantığı ürünler için de geçerli olsun
+        for p_key, p_val in product_map.items():
+            if p_key in key: return p_val # "yeşil zeytin çizik" içinde "yeşil zeytin" var mı?
+            
         best = find_best_match(clean_prod, list(product_map.keys()), cutoff=0.85)
         if best: return product_map[turkish_lower(best)]
         return clean_prod
@@ -209,8 +219,7 @@ def save_receipt_smart(raw_text):
     client, err = get_gspread_client()
     if not client: return False, err
     price_db = get_price_database(client)
-    
-    # Mevcut firma listesini al (Akıllı eşleşme için)
+    # Known companies for matching
     known_companies = list(price_db.keys())
     
     try:
@@ -249,22 +258,20 @@ def save_receipt_smart(raw_text):
             fn = turkish_lower(firma)
             if fn in existing_sheets: ws = existing_sheets[fn]
             else:
-                # Sekme oluştururken hata toleransı
                 try:
                     ws = sh.add_worksheet(title=firma, rows=1000, cols=10)
                     ws.append_row(["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM FİYAT", "TOPLAM TUTAR"])
                     existing_sheets[fn] = ws
                 except:
-                    # Eğer hata verirse (zaten var vs), var olanı almayı dene
                     try: ws = sh.worksheet(firma)
-                    except: continue # Yapacak bir şey yok, atla
+                    except: continue
             ws.append_rows(rows)
             msg.append(f"{firma}: {len(rows)}")
         return True, " | ".join(msg) + " eklendi."
     except Exception as e: return False, str(e)
 
 # ==========================================
-# MODÜL 2: FATURA İŞLEMLERİ (GÜNCELLENDİ)
+# MODÜL 2: FATURA İŞLEMLERİ
 # ==========================================
 def analyze_invoice_pdf(uploaded_file, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -277,7 +284,7 @@ def analyze_invoice_pdf(uploaded_file, model_name):
     FATURAYI analiz et.
     1. Tedarikçi Firmayı Bul.
     2. Kalemlerin BİRİM FİYATLARINI (KDV Hariç) çıkar.
-    3. HESAPLAMA: "5KG", "Teneke" gibi paketse birim fiyatı hesapla (Toplam / Miktar).
+    3. HESAPLAMA: "5KG", "Teneke", "18L" vb paketse, birim (KG/L) fiyatını bul.
     ÇIKTI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT
     Markdown kullanma.
     """
@@ -301,16 +308,15 @@ def update_price_list(raw_text):
         existing_data = ws.get_all_values()
         product_map = {}
         
-        # Mevcut firmaları listele (Benzerlik kontrolü için)
+        # Bilinen firmaları topla
         existing_companies = set()
-        
         for idx, row in enumerate(existing_data):
             if idx == 0: continue
             if len(row) >= 2:
                 k_firma = turkish_lower(row[0])
                 k_urun = turkish_lower(row[1])
                 product_map[f"{k_firma}|{k_urun}"] = idx + 1
-                existing_companies.add(row[0]) # Orijinal ismi sakla
+                existing_companies.add(row[0])
         
         existing_companies_list = list(existing_companies)
         
@@ -327,7 +333,7 @@ def update_price_list(raw_text):
                 
                 raw_supplier = parts[0]
                 
-                # --- BURASI DEĞİŞTİ: MEVCUT LİSTEYE GÖRE KONTROL ---
+                # --- DÜZELTME BURADA: Sözlüğü kullan ---
                 target_supplier = resolve_company_name(raw_supplier, client, existing_companies_list)
                 
                 raw_prod = parts[1].strip()
@@ -346,7 +352,7 @@ def update_price_list(raw_text):
                     cnt_new += 1
         if updates_batch: ws.batch_update(updates_batch)
         if new_rows_batch: ws.append_rows(new_rows_batch)
-        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi."
+        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi. (Firma: {target_supplier})"
     except Exception as e: return False, str(e)
 
 # ==========================================
@@ -357,7 +363,6 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
     if month_index == 12: next_month = datetime(year + 1, 1, 1)
     else: next_month = datetime(year, month_index + 1, 1)
     num_days = (next_month - start_date).days
-    
     menu_log = []
     usage_history = {}
     cats = {}
@@ -365,21 +370,17 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
         c = p.get('KATEGORİ', '').upper()
         if c not in cats: cats[c] = []
         cats[c].append(p)
-        
     def get_candidates(category): return cats.get(category, [])
-
     for day in range(1, num_days + 1):
         current_date = datetime(year, month_index, day)
         weekday = current_date.weekday()
         date_str = current_date.strftime("%d.%m.%Y")
-        
         is_holiday = False
         for h_start, h_end in holidays:
             if h_start <= current_date.date() <= h_end: is_holiday = True; break
         if is_holiday:
             menu_log.append({"GÜN": date_str, "KAHVALTI": "TATİL", "ÇORBA": "---", "ÖĞLE ANA": "---", "YAN": "---", "AKŞAM ANA": "---", "ARA": "---"})
             continue
-
         is_weekend = (weekday >= 5)
         def pick_dish(category, constraints={}):
             candidates = get_candidates(category)
@@ -394,13 +395,12 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
                 if constraints.get('block_protein') and dish.get('PROTEIN_TURU') == constraints['block_protein']: continue
                 if constraints.get('force_ready') and dish.get('PISIRME_EKIPMAN') != 'HAZIR': continue
                 valid_options.append(dish)
-            if not valid_options: return {"YEMEK ADI": f"SEÇENEK YOK ({category})"}
+            if not valid_options: return {"YEMEK ADI": "SEÇENEK YOK"}
             chosen = random.choice(valid_options)
             name = chosen['YEMEK ADI']
             if name not in usage_history: usage_history[name] = []
             usage_history[name].append(day)
             return chosen
-
         kahvalti = pick_dish("KAHVALTI EKSTRA")
         corba = pick_dish("ÇORBA")
         ogle_ana = pick_dish("ANA YEMEK")
@@ -426,7 +426,7 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
 # ==========================================
 def main():
     with st.sidebar:
-        st.title("Mutfak ERP V17.1")
+        st.title("Mutfak ERP V17.3")
         if st.button("🔒 Güvenli Çıkış"):
             st.session_state.clear()
             st.rerun()
@@ -454,12 +454,12 @@ def main():
                         else: st.error(m)
 
     elif page == "🧾 Fatura & Fiyatlar":
-        st.header("🧾 Fiyat Güncelleme (Veri Temizlikçisi)")
-        st.info("Mevcut firma isimleriyle benzeşen yeni isimleri otomatik birleştirir.")
+        st.header("🧾 Fiyat Güncelleme")
+        st.info("İpucu: 'AYARLAR' sekmesine 'AREN | Eker' yazarsan otomatik düzeltir.")
         pdf = st.file_uploader("PDF Fatura", type=['pdf'])
         if pdf:
             if st.button("Analiz Et"):
-                with st.spinner("Okunuyor..."):
+                with st.spinner("PDF Okunuyor..."):
                     s, r = analyze_invoice_pdf(pdf, sel_model)
                     st.session_state['inv'] = r
             if 'inv' in st.session_state:

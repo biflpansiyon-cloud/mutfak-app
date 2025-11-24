@@ -10,8 +10,9 @@ from datetime import datetime, timedelta
 import difflib
 import pandas as pd
 import random
+import re
 
-st.set_page_config(page_title="Mutfak ERP (Grand Final)", page_icon="🏛️", layout="wide")
+st.set_page_config(page_title="Mutfak ERP (V16.1 Hesap Uzmanı)", page_icon="🧮", layout="wide")
 
 # ==========================================
 # 🔒 GÜVENLİK DUVARI
@@ -56,12 +57,18 @@ def get_gspread_client():
         return None, str(e)
 
 # ==========================================
-# 🛠️ YARDIMCI FONKSİYONLAR (HEPSİ BURADA)
+# 🛠️ YARDIMCI FONKSİYONLAR
 # ==========================================
 def clean_number(num_str):
     try:
-        clean = ''.join(c for c in num_str if c.isdigit() or c in [',', '.'])
-        clean = clean.replace(',', '.')
+        # Regex ile sadece rakam ve nokta/virgülü al
+        clean = re.sub(r'[^\d.,]', '', num_str)
+        # Birden fazla nokta/virgül varsa sonuncusunu ondalık ayırıcı yap
+        if clean.count('.') > 1 or clean.count(',') > 1 or ('.' in clean and ',' in clean):
+             # Karmaşık formatları basitleştir (örn: 1.250,00 -> 1250.00)
+             clean = clean.replace('.', '').replace(',', '.')
+        else:
+             clean = clean.replace(',', '.')
         return float(clean)
     except: return 0.0
 
@@ -150,7 +157,6 @@ def get_full_menu_pool(client):
             while len(row) < len(header): row.append("")
             for i, col_name in enumerate(header):
                 item[col_name] = row[i].strip()
-            # Sayısal düzeltmeler
             try: item['LIMIT'] = int(item['LIMIT']) if item['LIMIT'] else 99
             except: item['LIMIT'] = 99
             try: item['ARA'] = int(item['ARA']) if item['ARA'] else 0
@@ -229,7 +235,7 @@ def save_receipt_smart(raw_text):
     except Exception as e: return False, str(e)
 
 # ==========================================
-# MODÜL 2: FATURA İŞLEMLERİ
+# MODÜL 2: FATURA İŞLEMLERİ (GÜNCELLENDİ - HESAP UZMANI)
 # ==========================================
 def analyze_invoice_pdf(uploaded_file, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -238,13 +244,31 @@ def analyze_invoice_pdf(uploaded_file, model_name):
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
+    
+    # --- PROMPT GÜNCELLENDİ: MATEMATİKSEL HESAPLAMA EKLENDİ ---
     prompt = """
-    FATURAYI analiz et.
+    FATURAYI analiz et. Amacımız stok takibi için GERÇEK BİRİM FİYATI bulmak.
+    
+    GÖREVLER:
     1. Tedarikçi Firmayı Bul.
-    2. Kalemlerin BİRİM FİYATLARINI (KDV Hariç) çıkar.
-    ÇIKTI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT
-    Markdown kullanma.
+    2. Ürünleri listele ve her biri için KDV HARİÇ BİRİM FİYATI hesapla.
+    
+    HESAPLAMA KURALI (ÇOK ÖNEMLİ):
+    - Faturadaki fiyatlar bazen "koli", "paket" veya "teneke" fiyatı olabilir.
+    - Ürün açıklamasında miktar belirtilmişse (Örn: "5KG", "900GR", "18L", "Teneke"), faturadaki fiyatı bu miktara bölerek KG veya LİTRE başı fiyatı bul.
+    - GR (Gram) varsa önce KG'ye çevir (900GR = 0.9 KG).
+    
+    ÖRNEKLER:
+    - Faturada: "Filiz Makarna 5KG" -> Fiyatı: 270 TL. Sen hesapla: 270 / 5 = 54.00 TL (Birim Fiyat).
+    - Faturada: "Ketçap 900GR" -> Fiyatı: 45 TL. Sen hesapla: 45 / 0.9 = 50.00 TL.
+    - Faturada: "Ayçiçek Yağı 18L Teneke" -> Fiyatı: 900 TL. Sen hesapla: 900 / 18 = 50.00 TL.
+    
+    ÇIKTI FORMATI:
+    TEDARİKÇİ | ÜRÜN ADI (Sadeleştirilmiş) | GÜNCEL BİRİM FİYAT (Hesaplanmış)
+    
+    Markdown kullanma, sadece veriyi ver.
     """
+    
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": base64_pdf}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
@@ -278,13 +302,19 @@ def update_price_list(raw_text):
                 parts = [p.strip() for p in line.split('|')]
                 if "TEDARİKÇİ" in parts[0].upper(): continue
                 while len(parts) < 3: parts.append("0")
-                if clean_number(parts[2]) == 0: continue
+                
+                fiyat_str = parts[2]
+                # Çok büyük fiyatları (paket fiyatı gibi duranları) kontrol et
+                # Bu kısım opsiyoneldir, yapay zeka hesaplamayı yapamazsa manuel bir emniyet sübabı olabilir.
+                # Şimdilik yapay zekaya güveniyoruz.
+                fiyat = clean_number(fiyat_str)
+                if fiyat == 0: continue
                 
                 raw_supplier = parts[0]
                 target_supplier = resolve_company_name(raw_supplier, client)
                 raw_prod = parts[1].strip()
                 final_prod = resolve_product_name(raw_prod, client)
-                fiyat = clean_number(parts[2])
+                
                 bugun = datetime.now().strftime("%d.%m.%Y")
                 
                 key = f"{turkish_lower(target_supplier)}|{turkish_lower(final_prod)}"
@@ -302,7 +332,7 @@ def update_price_list(raw_text):
     except Exception as e: return False, str(e)
 
 # ==========================================
-# MODÜL 3: MENÜ PLANLAYICI (AKILLI)
+# MODÜL 3: MENÜ PLANLAYICI (AYNI KALDI)
 # ==========================================
 def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
     start_date = datetime(year, month_index, 1)
@@ -394,7 +424,7 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
 # ==========================================
 def main():
     with st.sidebar:
-        st.title("Mutfak ERP V16")
+        st.title("Mutfak ERP V16.1")
         if st.button("🔒 Güvenli Çıkış"):
             st.session_state.clear()
             st.rerun()
@@ -422,16 +452,17 @@ def main():
                         else: st.error(m)
 
     elif page == "🧾 Fatura & Fiyatlar":
-        st.header("🧾 Fiyat Güncelleme")
+        st.header("🧾 Fiyat Güncelleme (Hesap Uzmanı Modu)")
+        st.info("ℹ️ PDF'teki '5KG'lık paket' fiyatlarını otomatik olarak KG fiyatına çevirir.")
         pdf = st.file_uploader("PDF Fatura", type=['pdf'])
         if pdf:
             if st.button("Analiz Et"):
-                with st.spinner("Okunuyor..."):
+                with st.spinner("PDF Okunuyor, Birim Fiyatlar Hesaplanıyor..."):
                     s, r = analyze_invoice_pdf(pdf, sel_model)
                     st.session_state['inv'] = r
             if 'inv' in st.session_state:
                 with st.form("upd"):
-                    ed = st.text_area("Algılanan", st.session_state['inv'], height=200)
+                    ed = st.text_area("Algılanan (Hesaplanmış Fiyatlar)", st.session_state['inv'], height=200)
                     if st.form_submit_button("Fiyatları İşle"):
                         s, m = update_price_list(ed)
                         if s: st.success(m); del st.session_state['inv']

@@ -1,6 +1,7 @@
 streamlit
 requests
-pandas
 gspread
 oauth2client
 Pillow
+pandas
+xlsxwriter

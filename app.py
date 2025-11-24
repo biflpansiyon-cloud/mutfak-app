@@ -1,6 +1,5 @@
 import streamlit as st
 from PIL import Image
-import pandas as pd
 from datetime import datetime
 import requests
 import json
@@ -26,7 +25,7 @@ def setup_sheets():
 client = setup_sheets()
 SHEET_NAME = "Mutfak_Takip"
 
-# --- 1. MODELLERİ LİSTELEME (DEBUGGER) ---
+# --- MODELLERİ LİSTELE ---
 def list_available_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -34,19 +33,15 @@ def list_available_models():
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
-            # Sadece resim okuyabilen (vision) modelleri ayıkla
-            vision_models = [m['name'] for m in data.get('models', []) if 'vision' in m['supportedGenerationMethods'] or 'generateContent' in m['supportedGenerationMethods']]
-            return vision_models
-        else:
-            return [f"Hata: {response.text}"]
-    except Exception as e:
-        return [f"Bağlantı Hatası: {str(e)}"]
+            # Sadece işimize yarayan modelleri al
+            return [m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+        return []
+    except:
+        return []
 
-# --- 2. ANALİZ FONKSİYONU ---
-def analyze_image_direct(image, selected_model_name):
+# --- ANALİZ (BALYOZ YÖNTEMİ) ---
+def analyze_image_simple(image, selected_model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
-    
-    # Model isminin başındaki 'models/' kısmını temizleyelim ki çift olmasın
     clean_model_name = selected_model_name.replace("models/", "")
     
     # Resmi Hazırla
@@ -54,14 +49,26 @@ def analyze_image_direct(image, selected_model_name):
     image.save(img_byte_arr, format='JPEG')
     base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-    # URL'yi dinamik yapıyoruz (Seçtiğin modele göre değişecek)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={api_key}"
-    
     headers = {'Content-Type': 'application/json'}
+    
+    # PROMPT: JSON yerine düz metin istiyoruz (Daha sağlam)
+    prompt_text = """
+    Sen bir muhasebe asistanısın. Bu irsaliyeyi oku.
+    Bana ürünleri SADECE şu formatta ver:
+    URUN ADI | MIKTAR | BIRIM FIYAT | TOPLAM TUTAR
+    
+    Örnek Çıktı:
+    Domates | 5 KG | 10 TL | 50 TL
+    Salatalık | 3 KG | 5 TL | 15 TL
+    
+    Başka hiçbir giriş cümlesi veya 'işte sonuçlar' gibi yazılar yazma. Sadece listeyi ver.
+    """
+
     payload = {
         "contents": [{
             "parts": [
-                {"text": "Sen bir muhasebe asistanısın. İrsaliye fotoğrafını analiz et. SADECE JSON formatında veri ver: [{\"Urun\": \"Ad\", \"Miktar\": \"kg\", \"Fiyat\": \"TL\", \"Tutar\": \"TL\"}]"},
+                {"text": prompt_text},
                 {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
             ]
         }]
@@ -69,42 +76,66 @@ def analyze_image_direct(image, selected_model_name):
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
-        if response.status_code == 200:
-            return True, response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return False, f"API Hatası ({response.status_code}): {response.text}"
+        
+        # HATA AYIKLAMA İÇİN:
+        if response.status_code != 200:
+            return False, f"Google Hatası ({response.status_code}): {response.text}"
+            
+        # Cevabı al
+        result_json = response.json()
+        try:
+            raw_text = result_json['candidates'][0]['content']['parts'][0]['text']
+            return True, raw_text
+        except KeyError:
+            return False, f"Google boş cevap döndü. Gelen paket: {str(result_json)}"
+            
     except Exception as e:
-        return False, f"Bağlantı Hatası: {str(e)}"
+        return False, f"Bağlantı Koptu: {str(e)}"
 
-def save_to_sheet(json_text):
+def save_lines_to_sheet(raw_text):
     if not client: return False, "Sheets Bağlantısı Yok"
+    
     try:
-        clean = json_text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean)
         sheet = client.open(SHEET_NAME).sheet1
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        count = 0
-        for item in data:
-            sheet.append_row([timestamp, item.get("Urun","-"), item.get("Miktar","0"), item.get("Fiyat","0"), item.get("Tutar","0")])
-            count += 1
-        return True, str(count)
+        added_count = 0
+        
+        # Satır satır oku
+        lines = raw_text.split('\n')
+        
+        for line in lines:
+            # Boş satırları atla
+            if not line.strip() or "|" not in line:
+                continue
+                
+            # Çizgilerden böl (Domates | 5 | .. )
+            parts = [p.strip() for p in line.split('|')]
+            
+            # Eğer 4 parça varsa tabloya ekle
+            if len(parts) >= 4:
+                row = [timestamp] + parts[:4] # Tarih + ilk 4 sütun
+                sheet.append_row(row)
+                added_count += 1
+                
+        if added_count == 0:
+            return False, "Metin okundu ama tablo formatına ( | ) uymuyor."
+            
+        return True, str(added_count)
+        
     except Exception as e: return False, str(e)
 
 # --- ARAYÜZ ---
-st.title("🍅 Mutfak İrsaliye (Tanı Modu)")
+st.title("🍅 Mutfak İrsaliye (Balyoz Modu)")
 
-# Yan Menüde Model Seçimi
+# Model Seçimi
 with st.sidebar:
-    st.header("⚙️ Ayarlar")
-    if st.button("Mevcut Modelleri Tara"):
-        models = list_available_models()
-        st.session_state['models'] = models
-        st.success("Modeller güncellendi!")
-
-    # Eğer model listesi varsa göster, yoksa varsayılanları koy
-    model_options = st.session_state.get('models', ['gemini-1.5-flash', 'gemini-pro-vision', 'gemini-1.5-pro'])
-    selected_model = st.selectbox("Kullanılacak Model:", model_options)
-    st.caption(f"Seçili: {selected_model}")
+    if st.button("Modelleri Güncelle"):
+        st.session_state['models'] = list_available_models()
+    
+    # Varsayılan olarak Flash modelini en üste koy
+    default_list = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']
+    model_options = st.session_state.get('models', default_list)
+    selected_model = st.selectbox("Model:", model_options)
 
 uploaded_file = st.file_uploader("İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
 
@@ -113,18 +144,23 @@ if uploaded_file:
     st.image(image, width=300)
     
     if st.button("Analiz Et ve Kaydet", type="primary"):
-        with st.spinner(f"{selected_model} ile okunuyor..."):
-            success, result = analyze_image_direct(image, selected_model)
+        with st.spinner("Google sunucusuyla konuşuluyor..."):
+            
+            # 1. Adım: Ham Metni Al
+            success, result_text = analyze_image_simple(image, selected_model)
+            
+            # Ham cevabı her durumda göster (Hata ayıklamak için şart)
+            with st.expander("Google'dan Gelen Ham Cevap (Kontrol Et)"):
+                st.text(result_text)
             
             if success:
-                st.toast("Okuma Başarılı!")
-                s_save, msg = save_to_sheet(result)
-                if s_save:
+                # 2. Adım: Tabloya Çevir ve Kaydet
+                save_success, save_msg = save_lines_to_sheet(result_text)
+                
+                if save_success:
                     st.balloons()
-                    st.success(f"✅ {msg} kalem eklendi!")
+                    st.success(f"✅ Başarılı! {save_msg} satır eklendi.")
                 else:
-                    st.error(f"Kayıt Hatası: {msg}")
+                    st.warning(f"Metin okundu ama Excel'e yazılamadı: {save_msg}")
             else:
-                st.error("❌ Analiz Başarısız")
-                with st.expander("Hata Detayı"):
-                    st.code(result)
+                st.error(f"Okuma Hatası: {result_text}")

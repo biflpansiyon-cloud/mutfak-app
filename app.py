@@ -8,10 +8,10 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
-st.set_page_config(page_title="Mutfak Dedektif", page_icon="🕵️‍♂️")
+st.set_page_config(page_title="Mutfak Bedava", page_icon="💸")
 
 # --- AYARLAR ---
-SHEET_NAME = "Mutfak_Takip"  # Dosya adın Google Drive'da harfi harfine bu olmalı
+SHEET_NAME = "Mutfak_Takip" 
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
 def get_gspread_client():
@@ -37,18 +37,16 @@ def analyze_receipt(image, selected_model):
     headers = {'Content-Type': 'application/json'}
     
     prompt = """
-    Muhasebe asistanı olarak bu fişi analiz et.
+    Bu fişi oku.
     1. TARİHİ bul (GG.AA.YYYY). Yoksa bugünü yaz.
-    2. Kalem kalem ürünleri çıkar.
-    3. Ürün isimlerini düzgün yaz.
-    
-    ÇIKTI FORMATI (Aralara | koy):
-    TARİH | ÜRÜN ADI | MİKTAR | BİRİM FİYAT | TOPLAM TUTAR
+    2. Ürünleri çıkar.
+    3. Format: TARİH | ÜRÜN | MİKTAR | FİYAT | TUTAR
+    4. Fiyat/Tutar yoksa boş bırakma, 0 yaz.
     
     Örnek:
-    24.11.2025 | Domates | 5 KG | 10 TL | 50 TL
+    30.10.2025 | Bıldırcın | 17.02 KG | 0 | 0
     
-    Sadece veriyi ver, başlık yazma.
+    Sadece veriyi ver.
     """
 
     payload = {
@@ -64,85 +62,65 @@ def analyze_receipt(image, selected_model):
         return False, "Boş cevap."
     except Exception as e: return False, str(e)
 
-# --- KAYIT (GARANTİLİ) ---
+# --- KAYIT (NAZ YAPMAYAN MOD) ---
 def save_to_sheet(raw_text):
     client, email_or_err = get_gspread_client()
     if not client: return False, f"Bağlantı Hatası: {email_or_err}"
     
     try:
-        # Dosyayı bulmaya çalış
-        try:
-            sheet = client.open(SHEET_NAME).sheet1
-        except gspread.SpreadsheetNotFound:
-            return False, f"DOSYA BULUNAMADI! Lütfen Google Drive'daki dosyanın adının tam olarak '{SHEET_NAME}' olduğundan emin ol."
-        except Exception as e:
-            return False, f"Dosya Açma Hatası: {str(e)}"
-
+        sheet = client.open(SHEET_NAME).sheet1
         rows_to_add = []
-        for line in raw_text.split('\n'):
+        
+        # Satır satır parçala
+        lines = raw_text.split('\n')
+        for line in lines:
             clean = line.strip()
-            if "|" in clean and clean.count("|") >= 2:
+            # İçinde en az bir çizgi varsa işlemeye çalış
+            if "|" in clean:
                 parts = [p.strip() for p in clean.split('|')]
+                
+                # Başlık satırıysa atla
                 if "TARİH" in parts[0].upper(): continue
-                while len(parts) < 5: parts.append("0")
-                rows_to_add.append(parts[:5])
+                
+                # BOŞLUKLARI DOLDUR (En kritik kısım burası)
+                # Eğer parça boşsa ("") hemen "0" yapıyoruz.
+                cleaned_parts = [p if p != "" else "0" for p in parts]
+                
+                # 5 Sütuna tamamla
+                while len(cleaned_parts) < 5: 
+                    cleaned_parts.append("0")
+                
+                # Sadece ilk 5 sütunu al (Fazlasını at)
+                final_row = cleaned_parts[:5]
+                
+                rows_to_add.append(final_row)
         
         if rows_to_add:
-            sheet.append_rows(rows_to_add) # Toplu ekleme daha güvenlidir
-            return True, f"{len(rows_to_add)} satır eklendi."
+            sheet.append_rows(rows_to_add)
+            return True, f"✅ {len(rows_to_add)} satır başarıyla eklendi!"
         else:
-            return False, "Eklenecek geçerli satır bulunamadı."
+            return False, "⚠️ Eklenecek satır bulunamadı. Metin formatı '|' içermiyor olabilir."
             
     except Exception as e:
         return False, f"Yazma Hatası: {str(e)}"
 
 # --- ARAYÜZ ---
-st.title("🕵️‍♂️ Mutfak Dedektif")
+st.title("💸 Mutfak Bedava (2.5 Flash)")
 
-# --- YAN MENÜ & TEST ---
+# --- YAN MENÜ ---
 with st.sidebar:
-    st.header("🛠️ Sorun Giderme")
-    
-    if st.button("⚠️ Google Sheets Test Et"):
-        with st.status("Bağlantı kontrol ediliyor...") as status:
-            client, email = get_gspread_client()
-            if client:
-                st.write(f"✅ Robot Girişi Başarılı: `{email}`")
-                try:
-                    sh = client.open(SHEET_NAME)
-                    st.write(f"✅ Dosya Bulundu: `{SHEET_NAME}`")
-                    ws = sh.sheet1
-                    st.write("✅ Sayfa Erişimi Tamam")
-                    
-                    # Test Yazısı
-                    ws.append_row([str(datetime.now()), "TEST", "BAĞLANTISI", "BAŞARILI", "OK"])
-                    st.success("TEST BAŞARILI! Tablona bir 'TEST' satırı eklendi, kontrol et.")
-                except gspread.SpreadsheetNotFound:
-                    st.error(f"❌ '{SHEET_NAME}' dosyası bulunamadı!")
-                    st.warning("İPUCU: Dosya adının birebir aynı olduğuna ve robot mailine 'Editör' yetkisi verdiğine emin ol.")
-                except Exception as e:
-                    st.error(f"❌ Hata: {e}")
-            else:
-                st.error("❌ Robot giriş yapamadı. Secrets ayarlarını kontrol et.")
+    st.header("🛠️ Ayarlar")
+    if st.button("⚠️ Test Et"):
+        c, _ = get_gspread_client()
+        if c: 
+            try:
+                c.open(SHEET_NAME).sheet1.append_row([str(datetime.now()), "TEST", "OK"])
+                st.success("Test Başarılı!")
+            except: st.error("Dosya Hatası")
+        else: st.error("Bağlantı Hatası")
 
-    st.divider()
-    
-    # Model Listesi
-    if st.button("Modelleri Yenile"):
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        try:
-            r = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}")
-            models = sorted([m['name'] for m in r.json().get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
-            st.session_state['models'] = models
-        except: pass
-    
-    models = st.session_state.get('models', [])
-    # 2.5 Flash yoksa Exp 1206 seçelim
-    def_ix = 0
-    for i, m in enumerate(models):
-        if "2.5-flash" in m: def_ix = i; break
-        
-    sel_model = st.selectbox("Model", models, index=def_ix) if models else st.text_input("Model", "models/gemini-exp-1206")
+    # Manuel Model Girişi (Senin 2.5 Flash için)
+    selected_model = st.text_input("Model Adı", "models/gemini-2.5-flash")
 
 # --- ANA EKRAN ---
 uploaded_file = st.file_uploader("Fiş Yükle", type=['jpg', 'png', 'jpeg'])
@@ -152,15 +130,22 @@ if uploaded_file:
     st.image(image, width=300)
     
     if st.button("Analiz Et", type="primary"):
-        with st.spinner("Okunuyor..."):
-            succ, txt = analyze_receipt(image, sel_model)
+        with st.spinner("Bıldırcınlar aranıyor..."):
+            succ, txt = analyze_receipt(image, selected_model)
             
-            with st.form("save_form"):
-                edited = st.text_area("Veriler", txt, height=150)
-                if st.form_submit_button("💾 Kaydet"):
-                    s_save, msg = save_to_sheet(edited)
-                    if s_save:
-                        st.balloons()
-                        st.success(msg)
-                    else:
-                        st.error(msg)
+            # SESSION STATE KULLANALIM Kİ KAYBOLMASIN
+            st.session_state['ocr_result'] = txt
+            
+    # Eğer sonuç varsa göster (Butona basılmasa bile sayfada kalsın)
+    if 'ocr_result' in st.session_state:
+        with st.form("save_form"):
+            st.info("Aşağıdaki veriler Google Sheets'e gidecek:")
+            edited = st.text_area("Veriler", st.session_state['ocr_result'], height=100)
+            
+            if st.form_submit_button("💾 Bıldırcını Kaydet"):
+                s_save, msg = save_to_sheet(edited)
+                if s_save:
+                    st.balloons()
+                    st.success(msg)
+                else:
+                    st.error(msg)

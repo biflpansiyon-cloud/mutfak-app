@@ -6,40 +6,33 @@ import base64
 import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
+from datetime import datetime
 import difflib
 import pandas as pd
 import random
 import re
 
-st.set_page_config(page_title="Mutfak ERP V17.3", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Mutfak ERP V18", page_icon="📉", layout="wide")
 
 # ==========================================
 # 🔒 GÜVENLİK DUVARI
 # ==========================================
 def check_password():
+    if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     def password_entered():
         if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.text_input("Lütfen Erişim Şifresini Giriniz:", type="password", on_change=password_entered, key="password")
+        else: st.session_state["password_correct"] = False
+    if not st.session_state["password_correct"]:
+        st.text_input("Şifre:", type="password", on_change=password_entered, key="password")
         return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("Lütfen Erişim Şifresini Giriniz:", type="password", on_change=password_entered, key="password")
-        st.error("⛔ Hatalı Şifre!")
-        return False
-    else:
-        return True
+    return True
 
-if not check_password():
-    st.stop()
+if not check_password(): st.stop()
 
 # ==========================================
-# ⚙️ AYARLAR VE BAĞLANTILAR
+# ⚙️ AYARLAR
 # ==========================================
 SHEET_NAME = "Mutfak_Takip"
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
@@ -53,19 +46,22 @@ def get_gspread_client():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         return client, creds_dict.get("client_email")
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
 # ==========================================
 # 🛠️ YARDIMCI FONKSİYONLAR
 # ==========================================
 def clean_number(num_str):
     try:
-        clean = re.sub(r'[^\d.,]', '', num_str)
-        if clean.count('.') > 1 or clean.count(',') > 1 or ('.' in clean and ',' in clean):
+        clean = re.sub(r'[^\d.,-]', '', str(num_str)) # Eksi işaretine de izin ver
+        if not clean: return 0.0
+        if clean.count('.') > 1 or clean.count(',') > 1:
              clean = clean.replace('.', '').replace(',', '.')
-        else:
+        elif ',' in clean and '.' not in clean:
              clean = clean.replace(',', '.')
+        elif ',' in clean and '.' in clean:
+             if clean.find(',') < clean.find('.'): clean = clean.replace(',', '')
+             else: clean = clean.replace('.', '').replace(',', '.')
         return float(clean)
     except: return 0.0
 
@@ -84,17 +80,22 @@ def find_best_match(ocr_text, db_list, cutoff=0.6):
     db_keys = [turkish_lower(p) for p in db_list]
     matches = difflib.get_close_matches(ocr_key, db_keys, n=1, cutoff=cutoff)
     if matches:
-        matched_key = matches[0]
-        idx = db_keys.index(matched_key)
-        return db_list[idx]
+        return db_list[db_keys.index(matches[0])]
     return None
 
-# --- GÜNCELLENMİŞ: KAPSAMA MANTIKLI FİRMA ÇÖZÜCÜ ---
+def get_or_create_worksheet(sh, title, cols, header):
+    try:
+        for ws in sh.worksheets():
+            if turkish_lower(ws.title) == turkish_lower(title): return ws
+        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
+        ws.append_row(header)
+        return ws
+    except Exception as e:
+        if "already exists" in str(e): return sh.worksheet(title)
+        return None
+
 def resolve_company_name(ocr_name, client, known_companies=None):
     std_name = standardize_name(ocr_name)
-    ocr_lower = turkish_lower(std_name) # Okunan ismin küçük hali (Örn: aren toptan gida pazarlama)
-    
-    # 1. AYARLAR Sekmesi (Sözlük) Kontrolü
     try:
         sh = client.open(SHEET_NAME)
         try:
@@ -103,32 +104,19 @@ def resolve_company_name(ocr_name, client, known_companies=None):
             alias_map = {}
             for row in data[1:]:
                 if len(row) >= 2: 
-                    # Sözlükteki anahtarı (Aren Toptan) ve değeri (Eker) al
-                    key_name = turkish_lower(row[0]).strip()
-                    target_val = row[1].strip()
-                    if key_name: alias_map[key_name] = target_val
-            
-            # A. TAM EŞLEŞME
-            if ocr_lower in alias_map: return alias_map[ocr_lower]
-            
-            # B. İÇİNDE GEÇİYOR MU? (KAPSAMA MANTIĞI - YENİ)
-            # Eğer sözlükteki "aren" kelimesi, okunan "aren toptan gıda"nın içindeyse -> Eşleştir!
-            for key_name, target_val in alias_map.items():
-                if key_name in ocr_lower: 
-                    return target_val
-            
-            # C. FUZZY MATCH (Yedek)
-            best_alias = find_best_match(std_name, list(alias_map.keys()), cutoff=0.7)
-            if best_alias: return alias_map[turkish_lower(best_alias)]
-            
-        except gspread.WorksheetNotFound: pass
+                    k = turkish_lower(row[0]).strip()
+                    v = row[1].strip()
+                    if k: alias_map[k] = v
+            if turkish_lower(std_name) in alias_map: return alias_map[turkish_lower(std_name)]
+            for k, v in alias_map.items():
+                if k in turkish_lower(std_name): return v
+            best = find_best_match(std_name, list(alias_map.keys()), cutoff=0.7)
+            if best: return alias_map[turkish_lower(best)]
+        except: pass
     except: pass
-
-    # 2. Mevcut Veritabanı Kontrolü
     if known_companies:
-        best_db_match = find_best_match(std_name, known_companies, cutoff=0.6)
-        if best_db_match: return best_db_match
-
+        best_db = find_best_match(std_name, known_companies, cutoff=0.6)
+        if best_db: return best_db
     return std_name
 
 def resolve_product_name(ocr_prod, client):
@@ -144,30 +132,36 @@ def resolve_product_name(ocr_prod, client):
                 if row[2] and row[3]: product_map[turkish_lower(row[2])] = row[3].strip()
         key = turkish_lower(clean_prod)
         if key in product_map: return product_map[key]
-        
-        # Kapsama mantığı ürünler için de geçerli olsun
-        for p_key, p_val in product_map.items():
-            if p_key in key: return p_val # "yeşil zeytin çizik" içinde "yeşil zeytin" var mı?
-            
+        for k, v in product_map.items():
+            if k in key: return v
         best = find_best_match(clean_prod, list(product_map.keys()), cutoff=0.85)
         if best: return product_map[turkish_lower(best)]
         return clean_prod
     except: return clean_prod
 
 def get_price_database(client):
+    # DİKKAT: Artık 5. Sütun (KALAN KOTA) var
+    # Dönüş yapısı: { "Firma|Urun": {"fiyat": 100, "kota": 50, "row": 2} }
     price_db = {}
     try:
         sh = client.open(SHEET_NAME)
-        try: ws = sh.worksheet(PRICE_SHEET_NAME)
-        except: return {}
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, cols=6, header=["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "GÜNCELLEME TARİHİ", "KALAN KOTA"])
         data = ws.get_all_values()
-        for row in data[1:]:
+        
+        for idx, row in enumerate(data):
+            if idx == 0: continue
             if len(row) >= 3:
                 ted = standardize_name(row[0])
                 urn = row[1].strip()
                 fyt = clean_number(row[2])
+                
+                # Kota sütununu oku (E sütunu = index 4)
+                kota = 0.0
+                if len(row) >= 5:
+                    kota = clean_number(row[4])
+                
                 if ted not in price_db: price_db[ted] = {}
-                price_db[ted][urn] = fyt
+                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "row": idx + 1}
         return price_db
     except: return {}
 
@@ -182,8 +176,7 @@ def get_full_menu_pool(client):
         for row in data[1:]:
             item = {}
             while len(row) < len(header): row.append("")
-            for i, col_name in enumerate(header):
-                item[col_name] = row[i].strip()
+            for i, col_name in enumerate(header): item[col_name] = row[i].strip()
             try: item['LIMIT'] = int(item['LIMIT']) if item['LIMIT'] else 99
             except: item['LIMIT'] = 99
             try: item['ARA'] = int(item['ARA']) if item['ARA'] else 0
@@ -193,7 +186,7 @@ def get_full_menu_pool(client):
     except: return []
 
 # ==========================================
-# MODÜL 1: İRSALİYE İŞLEMLERİ
+# MODÜL 1: İRSALİYE (KOTA DÜŞÜCÜ)
 # ==========================================
 def analyze_receipt_image(image, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -205,7 +198,7 @@ def analyze_receipt_image(image, model_name):
     headers = {'Content-Type': 'application/json'}
     prompt = """
     İrsaliyeyi analiz et. Tedarikçi firmayı bul.
-    ÇIKTI: TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR | BİRİM FİYAT | TOPLAM TUTAR
+    ÇIKTI: TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR (Birimli) | BİRİM FİYAT | TOPLAM TUTAR
     Fiyat yoksa 0 yaz. Markdown kullanma.
     """
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
@@ -218,14 +211,20 @@ def analyze_receipt_image(image, model_name):
 def save_receipt_smart(raw_text):
     client, err = get_gspread_client()
     if not client: return False, err
+    
+    # Veritabanını çek
     price_db = get_price_database(client)
-    # Known companies for matching
     known_companies = list(price_db.keys())
     
     try:
         sh = client.open(SHEET_NAME)
+        # Fiyat anahtarı sekmesine erişim (Kota güncellemek için)
+        price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 6, [])
+        
         existing_sheets = {turkish_lower(ws.title): ws for ws in sh.worksheets()}
         firm_data = {}
+        kota_updates = [] # Toplu güncelleme listesi
+        
         for line in raw_text.split('\n'):
             line = line.replace("*", "").strip()
             if "|" in line:
@@ -234,44 +233,62 @@ def save_receipt_smart(raw_text):
                 while len(parts) < 6: parts.append("0")
                 
                 ocr_raw_name = parts[0]
-                # Firma adını çözerken bilinen firmaları da gönderiyoruz
                 final_firma = resolve_company_name(ocr_raw_name, client, known_companies)
-                
                 tarih, urun, miktar, fiyat, tutar = parts[1], parts[2], parts[3], parts[4], parts[5]
                 f_val = clean_number(fiyat)
                 final_urun = resolve_product_name(urun, client)
+                m_val = clean_number(miktar) # Gelen miktar
                 
-                if f_val == 0 and final_firma in price_db:
+                # --- FİYAT VE KOTA OPERASYONU ---
+                if final_firma in price_db:
                     prods = list(price_db[final_firma].keys())
                     match_prod = find_best_match(final_urun, prods, cutoff=0.7)
+                    
                     if match_prod:
-                        f_val = price_db[final_firma][match_prod]
-                        fiyat = str(f_val)
-                        final_urun = match_prod 
-                        m_val = clean_number(miktar)
-                        tutar = f"{m_val * f_val:.2f}"
+                        db_item = price_db[final_firma][match_prod]
+                        
+                        # 1. Fiyat Yoksa Çek
+                        if f_val == 0:
+                            f_val = db_item['fiyat']
+                            fiyat = str(f_val)
+                            tutar = f"{m_val * f_val:.2f}"
+                        
+                        # 2. İsmi Standartlaştır
+                        final_urun = match_prod
+                        
+                        # 3. KOTADAN DÜŞ (İrsaliye = Harcama)
+                        current_kota = db_item['kota']
+                        new_kota = current_kota - m_val
+                        row_num = db_item['row']
+                        
+                        # Güncellemeyi listeye ekle (Hücre E{row})
+                        kota_updates.append({'range': f'E{row_num}', 'values': [[new_kota]]})
                 
                 if final_firma not in firm_data: firm_data[final_firma] = []
                 firm_data[final_firma].append([tarih, final_urun, miktar, fiyat, tutar])
+        
+        # Google Sheets'e Yazma İşlemleri
         msg = []
+        # 1. İrsaliyeleri Yaz
         for firma, rows in firm_data.items():
             fn = turkish_lower(firma)
             if fn in existing_sheets: ws = existing_sheets[fn]
             else:
-                try:
-                    ws = sh.add_worksheet(title=firma, rows=1000, cols=10)
-                    ws.append_row(["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM FİYAT", "TOPLAM TUTAR"])
-                    existing_sheets[fn] = ws
-                except:
-                    try: ws = sh.worksheet(firma)
-                    except: continue
+                ws = get_or_create_worksheet(sh, firma, 1000, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM FİYAT", "TOPLAM TUTAR"])
+                existing_sheets[fn] = ws
             ws.append_rows(rows)
             msg.append(f"{firma}: {len(rows)}")
+            
+        # 2. Kotaları Güncelle (Batch Update)
+        if kota_updates:
+            price_ws.batch_update(kota_updates)
+            msg.append(f"(Stoklar Güncellendi: {len(kota_updates)} kalem)")
+            
         return True, " | ".join(msg) + " eklendi."
     except Exception as e: return False, str(e)
 
 # ==========================================
-# MODÜL 2: FATURA İŞLEMLERİ
+# MODÜL 2: FATURA (KOTA YÜKLEYİCİ)
 # ==========================================
 def analyze_invoice_pdf(uploaded_file, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -283,9 +300,16 @@ def analyze_invoice_pdf(uploaded_file, model_name):
     prompt = """
     FATURAYI analiz et.
     1. Tedarikçi Firmayı Bul.
-    2. Kalemlerin BİRİM FİYATLARINI (KDV Hariç) çıkar.
-    3. HESAPLAMA: "5KG", "Teneke", "18L" vb paketse, birim (KG/L) fiyatını bul.
-    ÇIKTI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT
+    2. Kalemleri listele.
+    3. ÖNEMLİ: Hem BİRİM FİYATI hem de TOPLAM MİKTARI (KG/L/Adet) bul.
+       - Eğer "5 Koli x 10 KG" ise Toplam Miktar = 50 KG.
+       - Birim Fiyat her zaman KG/Litre fiyatı olsun.
+    
+    ÇIKTI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT | FATURA TOPLAM MİKTAR
+    
+    Örnek:
+    Alp Et | Kıyma | 450.00 | 50 KG
+    
     Markdown kullanma.
     """
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": base64_pdf}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
@@ -300,59 +324,72 @@ def update_price_list(raw_text):
     if not client: return False, err
     try:
         sh = client.open(SHEET_NAME)
-        try: ws = sh.worksheet(PRICE_SHEET_NAME)
-        except: 
-            ws = sh.add_worksheet(title=PRICE_SHEET_NAME, rows=1000, cols=5)
-            ws.append_row(["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "GÜNCELLEME TARİHİ"])
+        # Yeni sütunlu başlık (E Sütunu: KALAN KOTA)
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 5, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "GÜNCELLEME TARİHİ", "KALAN KOTA"])
         
         existing_data = ws.get_all_values()
         product_map = {}
-        
-        # Bilinen firmaları topla
         existing_companies = set()
+        
+        # Veritabanını haritala
         for idx, row in enumerate(existing_data):
             if idx == 0: continue
             if len(row) >= 2:
                 k_firma = turkish_lower(row[0])
                 k_urun = turkish_lower(row[1])
-                product_map[f"{k_firma}|{k_urun}"] = idx + 1
+                
+                # Mevcut kotayı al (Yoksa 0)
+                current_quota = 0.0
+                if len(row) >= 5: current_quota = clean_number(row[4])
+                
+                product_map[f"{k_firma}|{k_urun}"] = {"row": idx + 1, "quota": current_quota}
                 existing_companies.add(row[0])
         
         existing_companies_list = list(existing_companies)
-        
         updates_batch, new_rows_batch = [], []
         cnt_upd, cnt_new = 0, 0
+        
         lines = raw_text.split('\n')
         for line in lines:
             line = line.replace("*", "").replace("- ", "").strip()
             if "|" in line:
                 parts = [p.strip() for p in line.split('|')]
                 if "TEDARİKÇİ" in parts[0].upper(): continue
-                while len(parts) < 3: parts.append("0")
+                while len(parts) < 4: parts.append("0") # 4. Sütun Miktar
+                
                 if clean_number(parts[2]) == 0: continue
                 
                 raw_supplier = parts[0]
-                
-                # --- DÜZELTME BURADA: Sözlüğü kullan ---
                 target_supplier = resolve_company_name(raw_supplier, client, existing_companies_list)
-                
                 raw_prod = parts[1].strip()
                 final_prod = resolve_product_name(raw_prod, client)
                 fiyat = clean_number(parts[2])
+                
+                # Faturadan gelen miktar (KREDİ)
+                gelen_miktar = clean_number(parts[3])
+                
                 bugun = datetime.now().strftime("%d.%m.%Y")
                 
                 key = f"{turkish_lower(target_supplier)}|{turkish_lower(final_prod)}"
+                
                 if key in product_map:
-                    row_idx = product_map[key]
-                    updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]})
-                    updates_batch.append({'range': f'D{row_idx}', 'values': [[bugun]]})
+                    # GÜNCELLEME: Fiyatı değiş, Kotayı EKLE (Eski + Yeni)
+                    item_data = product_map[key]
+                    row_idx = item_data['row']
+                    new_total_quota = item_data['quota'] + gelen_miktar
+                    
+                    updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]}) # Fiyat
+                    updates_batch.append({'range': f'D{row_idx}', 'values': [[bugun]]}) # Tarih
+                    updates_batch.append({'range': f'E{row_idx}', 'values': [[new_total_quota]]}) # Kota
                     cnt_upd += 1
                 else:
-                    new_rows_batch.append([target_supplier, final_prod, fiyat, bugun])
+                    # YENİ ÜRÜN: Kotası gelen miktar kadar
+                    new_rows_batch.append([target_supplier, final_prod, fiyat, bugun, gelen_miktar])
                     cnt_new += 1
+        
         if updates_batch: ws.batch_update(updates_batch)
         if new_rows_batch: ws.append_rows(new_rows_batch)
-        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi. (Firma: {target_supplier})"
+        return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi. (Stoklar artırıldı)"
     except Exception as e: return False, str(e)
 
 # ==========================================
@@ -426,7 +463,7 @@ def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
 # ==========================================
 def main():
     with st.sidebar:
-        st.title("Mutfak ERP V17.3")
+        st.title("Mutfak ERP V18")
         if st.button("🔒 Güvenli Çıkış"):
             st.session_state.clear()
             st.rerun()
@@ -448,24 +485,24 @@ def main():
             if 'res' in st.session_state:
                 with st.form("save"):
                     ed = st.text_area("Veriler", st.session_state['res'], height=150)
-                    if st.form_submit_button("Kaydet"):
+                    if st.form_submit_button("Kaydet (Stoktan Düş)"):
                         s, m = save_receipt_smart(ed)
                         if s: st.success(m); del st.session_state['res']
                         else: st.error(m)
 
     elif page == "🧾 Fatura & Fiyatlar":
-        st.header("🧾 Fiyat Güncelleme")
-        st.info("İpucu: 'AYARLAR' sekmesine 'AREN | Eker' yazarsan otomatik düzeltir.")
+        st.header("🧾 Fiyat & Stok Güncelleme")
+        st.info("Faturadaki miktarlar stok kotasına EKLENİR.")
         pdf = st.file_uploader("PDF Fatura", type=['pdf'])
         if pdf:
             if st.button("Analiz Et"):
-                with st.spinner("PDF Okunuyor..."):
+                with st.spinner("Okunuyor..."):
                     s, r = analyze_invoice_pdf(pdf, sel_model)
                     st.session_state['inv'] = r
             if 'inv' in st.session_state:
                 with st.form("upd"):
                     ed = st.text_area("Algılanan", st.session_state['inv'], height=200)
-                    if st.form_submit_button("Fiyatları İşle"):
+                    if st.form_submit_button("İşle (Stoka Ekle)"):
                         s, m = update_price_list(ed)
                         if s: st.success(m); del st.session_state['inv']
                         else: st.error(m)

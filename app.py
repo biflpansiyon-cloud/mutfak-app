@@ -9,7 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import difflib
 
-st.set_page_config(page_title="Mutfak Zeka V6", page_icon="🧠")
+st.set_page_config(page_title="Mutfak Otorite", page_icon="⚖️")
 
 # --- AYARLAR ---
 SHEET_NAME = "Mutfak_Takip"
@@ -47,21 +47,24 @@ def clean_number(num_str):
     except: return 0.0
 
 def standardize_name(text):
-    """ 'ALP ET ' -> 'Alp Et' yapar. Boşlukları alır, baş harfleri büyütür. """
     if not text or len(text.strip()) < 2: return "Genel"
-    # Türkçe karakter sorununu azaltmak için title() yerine capitalize() veya manuel yöntem
     cleaned = text.strip()
-    # Basit bir baş harf büyütme (Türkçe I/i sorunu yaşamamak için)
     return " ".join([word.capitalize() for word in cleaned.split()])
 
-def find_best_match(ocr_product, db_products_list):
-    if not ocr_product: return None
-    matches = difflib.get_close_matches(ocr_product.lower(), [p.lower() for p in db_products_list], n=1, cutoff=0.7)
+# --- KRİTİK NOKTA: BENZERLİK BULUCU ---
+def find_best_match(ocr_text, db_list, cutoff=0.6):
+    """
+    Hem ÜRÜN hem FİRMA için kullanılır.
+    cutoff=0.6 demek: %60 benziyorsa yapıştır geç demektir.
+    """
+    if not ocr_text: return None
+    matches = difflib.get_close_matches(ocr_text.lower(), [p.lower() for p in db_list], n=1, cutoff=cutoff)
     if matches:
         matched_lower = matches[0]
-        for original_name in db_products_list:
-            if original_name.lower() == matched_lower:
-                return original_name
+        # Orijinal (Büyük/Küçük harfli) halini bulup döndür
+        for original in db_list:
+            if original.lower() == matched_lower:
+                return original
     return None
 
 # --- FİYAT BANKASINI ÇEK ---
@@ -72,14 +75,16 @@ def get_price_database(client):
         try:
             ws = sh.worksheet(PRICE_SHEET_NAME)
         except gspread.WorksheetNotFound:
-            return {} # Fiyat sekmesi yoksa boş dön
+            return {}
             
         data = ws.get_all_values()
         for row in data[1:]:
             if len(row) >= 3:
-                tedarikci = standardize_name(row[0])
+                # Tedarikçi ismini standartlaştır ama olduğu gibi sakla
+                tedarikci = standardize_name(row[0]) 
                 urun = row[1].strip()
                 fiyat = clean_number(row[2])
+                
                 if tedarikci not in price_db: price_db[tedarikci] = {}
                 price_db[tedarikci][urun] = fiyat
         return price_db
@@ -99,15 +104,15 @@ def analyze_receipt(image, selected_model):
     headers = {'Content-Type': 'application/json'}
     
     prompt = """
-    Bu irsaliyeyi analiz et. Tedarikçi firmayı logolardan veya başlıktan bul.
+    Bu irsaliyeyi analiz et. Tedarikçi firmayı bul.
     
     ÇIKTI FORMATI:
-    TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR (Sadece sayı ve birim) | BİRİM FİYAT | TOPLAM TUTAR
+    TEDARİKÇİ | TARİH (GG.AA.YYYY) | ÜRÜN ADI | MİKTAR (Sayı ve Birim) | BİRİM FİYAT | TOPLAM TUTAR
     
     KURALLAR:
     1. Fiyat/Tutar yazmıyorsa '0' yaz.
-    2. Firma adını kısa ve net tut (Örn: 'Yılmaz Gıda San. Tic.' yerine sadece 'Yılmaz Gıda').
-    3. Miktarı olduğu gibi yaz (5 KG, 10 Adet).
+    2. Firma adını, irsaliyenin en tepesindeki büyük logodan/yazıdan al.
+    3. Miktarı olduğu gibi yaz.
     """
 
     payload = {
@@ -123,24 +128,22 @@ def analyze_receipt(image, selected_model):
         return False, "Boş cevap."
     except Exception as e: return False, str(e)
 
-# --- KAYIT (BETONARME MOD - HATA GİDERİLDİ) ---
+# --- KAYIT (FİRMA EŞLEŞTİRMELİ MOD) ---
 def save_with_pricing_smart(raw_text):
     client, email_or_err = get_gspread_client()
     if not client: return False, f"Bağlantı Hatası: {email_or_err}"
     
+    # 1. Bankayı Çek
     price_db = get_price_database(client)
+    
+    # 2. Bankadaki Firma Listesini Çıkar (Otorite Listesi)
+    known_companies = list(price_db.keys())
     
     try:
         sh = client.open(SHEET_NAME)
         
-        # --- YENİ SAĞLAMLAŞTIRMA ADIMI ---
-        # Mevcut sekmelerin listesini al ve normalize et (karşılaştırma için)
-        existing_sheets_map = {}
-        for ws in sh.worksheets():
-            # Sekme adını al, boşlukları sil, küçük harfe çevir
-            normalized_title = ws.title.strip().lower()
-            existing_sheets_map[normalized_title] = ws
-        # ----------------------------------
+        # Mevcut sekmeleri haritala
+        existing_sheets_map = {ws.title.strip().lower(): ws for ws in sh.worksheets()}
 
         firm_data = {}
         
@@ -153,8 +156,18 @@ def save_with_pricing_smart(raw_text):
                 if "TEDARİKÇİ" in parts[0].upper(): continue
                 while len(parts) < 6: parts.append("0")
                 
-                raw_firma = parts[0]
-                firma_std = standardize_name(raw_firma) # Örn: "Yılmaz Gıda"
+                # --- YENİ ÖZELLİK: FİRMA ADI MUTABAKATI ---
+                ocr_firma = standardize_name(parts[0])
+                
+                # Bu firma bankada var mı? Benzeri var mı?
+                # "Uysallar Ekmek" geldi -> Listede "Uysallar Ekmek Fırını" var mı?
+                matched_company = find_best_match(ocr_firma, known_companies, cutoff=0.6)
+                
+                if matched_company:
+                    final_firma = matched_company # Evet var, bankadaki ismini kullan!
+                else:
+                    final_firma = ocr_firma # Yoksa mecburen OCR sonucunu kullan
+                # -------------------------------------------
                 
                 tarih = parts[1].strip()
                 urun_ocr = parts[2].strip()
@@ -165,46 +178,46 @@ def save_with_pricing_smart(raw_text):
                 # Fiyat Motoru
                 fiyat_val = clean_number(fiyat_str)
                 if fiyat_val == 0:
-                    if firma_std in price_db:
-                        firma_urunleri = list(price_db[firma_std].keys())
-                        best_match = find_best_match(urun_ocr, firma_urunleri)
+                    # Artık final_firma ile arıyoruz, yani eşleşme garanti
+                    if final_firma in price_db:
+                        firma_urunleri = list(price_db[final_firma].keys())
+                        best_match = find_best_match(urun_ocr, firma_urunleri, cutoff=0.7)
+                        
                         if best_match:
-                            found_price = price_db[firma_std][best_match]
+                            found_price = price_db[final_firma][best_match]
                             fiyat_val = found_price
                             fiyat_str = str(found_price)
                             urun_ocr = f"{urun_ocr} ({best_match})"
+                            
                             miktar_val = clean_number(miktar_str)
                             tutar_val = miktar_val * fiyat_val
                             tutar_str = f"{tutar_val:.2f}"
                 
                 row_data = [tarih, urun_ocr, miktar_str, fiyat_str, tutar_str]
                 
-                if firma_std not in firm_data: firm_data[firma_std] = []
-                firm_data[firma_std].append(row_data)
+                if final_firma not in firm_data: firm_data[final_firma] = []
+                firm_data[final_firma].append(row_data)
 
-        # Kayıt İşlemi (Güvenli Mod)
+        # Kayıt İşlemi
         messages = []
-        for firma_std, rows in firm_data.items():
-            # Karşılaştırma için normalize et
-            firma_normalized = firma_std.strip().lower()
+        for firma_adi, rows in firm_data.items():
+            firma_norm = firma_adi.strip().lower()
             
-            if firma_normalized in existing_sheets_map:
-                # LİSTEDE VARSA O SEKMEYİ KULLAN
-                ws = existing_sheets_map[firma_normalized]
+            if firma_norm in existing_sheets_map:
+                ws = existing_sheets_map[firma_norm]
                 action = "Eklendi"
             else:
-                # LİSTEDE YOKSA YENİ OLUŞTUR
                 try:
-                    ws = sh.add_worksheet(title=firma_std, rows=1000, cols=10)
+                    # Yeni sekme açılırken de artık standardize edilmiş ismi (örn: Uysallar Ekmek Fırını) kullanacak
+                    ws = sh.add_worksheet(title=firma_adi, rows=1000, cols=10)
                     ws.append_row(["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM FİYAT", "TOPLAM TUTAR"])
-                    # Yeni yaratılanı da listeye ekle ki döngüde tekrar yaratmaya çalışmasın
-                    existing_sheets_map[firma_normalized] = ws
-                    action = "Yeni sekme açıldı ve eklendi"
+                    existing_sheets_map[firma_norm] = ws
+                    action = "Yeni sekme"
                 except Exception as e:
-                     return False, f"Sekme oluşturma hatası ({firma_std}): {str(e)}"
+                     return False, f"Sekme hatası ({firma_adi}): {str(e)}"
             
             ws.append_rows(rows)
-            messages.append(f"{firma_std}: {len(rows)} satır ({action})")
+            messages.append(f"{firma_adi}: {len(rows)} satır ({action})")
             
         if messages: return True, " | ".join(messages)
         else: return False, "Veri yok."
@@ -212,7 +225,7 @@ def save_with_pricing_smart(raw_text):
     except Exception as e: return False, f"Hata: {str(e)}"
 
 # --- ARAYÜZ ---
-st.title("🧠 Mutfak Zeka V6 (Betonarme)")
+st.title("⚖️ Mutfak Otorite")
 
 with st.sidebar:
     st.header("Ayarlar")
@@ -225,7 +238,7 @@ with st.sidebar:
     ix = 0
     if "models/gemini-2.5-flash" in cl: ix = cl.index("models/gemini-2.5-flash")
     sel_model = st.selectbox("Model", cl, index=ix)
-    st.info("Sekme hatası giderildi. Artık mevcut sekmeleri kontrol edip yazıyor.")
+    st.info("Firma isimlerini 'FIYAT_ANAHTARI' sekmesine göre düzeltir.")
 
 uploaded_file = st.file_uploader("İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
 
@@ -234,16 +247,16 @@ if uploaded_file:
     st.image(image, width=300)
     
     if st.button("Analiz Et", type="primary"):
-        with st.spinner("Analiz ediliyor..."):
+        with st.spinner("Firma veritabanı taranıyor..."):
             succ, txt = analyze_receipt(image, sel_model)
             st.session_state['ocr_result'] = txt
             
     if 'ocr_result' in st.session_state:
         with st.form("edit_save"):
-            st.info("Format: TEDARİKÇİ | TARİH | ÜRÜN | MİKTAR | FİYAT | TUTAR")
-            edited = st.text_area("Sonuç (Gerekirse 'Yılmaz Gıda' kısmını düzelt)", st.session_state['ocr_result'], height=150)
+            st.info("TEDARİKÇİ | TARİH | ÜRÜN | MİKTAR | FİYAT | TUTAR")
+            edited = st.text_area("Sonuç", st.session_state['ocr_result'], height=150)
             
-            if st.form_submit_button("💾 Akıllı Kaydet"):
+            if st.form_submit_button("💾 Otoriter Kaydet"):
                 s_save, msg = save_with_pricing_smart(edited)
                 if s_save:
                     st.balloons()

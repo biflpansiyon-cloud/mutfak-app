@@ -6,131 +6,103 @@ import google.generativeai as genai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Mutfak Devriyesi", page_icon="🍅")
 
-# --- 1. MODEL SEÇİM FONKSİYONU (ZIRHLI KISIM) ---
-def get_working_model():
-    """
-    Bu fonksiyon sırasıyla en yeni modelleri dener.
-    Eğer sunucu 1.5-flash'ı tanımazsa, otomatik olarak pro-vision'a geçer.
-    Böylece '404 Model Not Found' hatası almazsın.
-    """
-    model_list = [
-        'gemini-1.5-flash',          # En hızlı ve yeni (Hedefimiz bu)
-        'gemini-1.5-flash-latest',   # Alternatif isim
-        'gemini-1.5-pro',            # Daha güçlü ama yavaş
-        'gemini-pro-vision'          # Eski ama sağlam (Yedek lastik)
-    ]
-    
-    active_model = None
-    active_name = ""
-    
-    # API Anahtarını al
+# --- BAŞLANGIÇ AYARLARI ---
+def setup_credentials():
     try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        genai.configure(api_key=api_key)
-    except Exception as e:
-        return None, f"API Anahtarı Hatası: {e}"
-
-    # Modelleri tek tek dene
-    for model_name in model_list:
-        try:
-            model = genai.GenerativeModel(model_name)
-            # Eğer buraya kadar hata vermediyse model çalışıyor demektir
-            active_model = model
-            active_name = model_name
-            break # Çalışanı bulduk, döngüden çık
-        except:
-            continue # Bu çalışmadı, sıradakine geç
-            
-    if active_model:
-        return active_model, active_name
-    else:
-        return None, "Hiçbir model yüklenemedi. Kütüphane sürümünü kontrol et."
-
-# --- 2. GOOGLE SHEETS BAĞLANTISI ---
-def connect_to_sheets():
-    try:
+        # Google Sheets
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Secrets'tan servis hesabı bilgilerini al
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
+        
+        # Gemini API
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        
         return client
     except Exception as e:
         return None
 
-# --- BAŞLANGIÇ AYARLARI ---
-model, model_name = get_working_model()
-client = connect_to_sheets()
-SHEET_NAME = "Mutfak_Takip" # Google Sheet dosyanın adı tam olarak bu olmalı
+client = setup_credentials()
+SHEET_NAME = "Mutfak_Takip"
 
-# --- ANA FONKSİYONLAR ---
-def analyze_image(img):
-    if not model:
-        return "HATA: Yapay Zeka Modeli Yüklenemedi."
-        
+# --- ZEKİ ANALİZ FONKSİYONU (SİGORTALI) ---
+def analyze_with_fallback(img):
+    """
+    Bu fonksiyon modelleri sırayla dener. 
+    Biri hata verirse diğerine geçer.
+    """
+    # Denenecek modeller listesi (En iyiden en garantiye)
+    models_to_try = [
+        'gemini-1.5-flash',       # Hızlı ve Yeni
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-pro',         # Güçlü
+        'gemini-pro-vision'       # ESKİ AMA GARANTİ (Resimler için)
+    ]
+    
     prompt = """
-    Sen uzman bir muhasebe asistanısın. Yüklenen irsaliye fotoğrafını analiz et.
-    SADECE ve SADECE aşağıdaki JSON formatında bir liste ver.
-    Başka hiçbir açıklama, yorum veya metin yazma.
+    Sen bir muhasebe asistanısın. İrsaliye fotoğrafını analiz et.
+    SADECE aşağıdaki JSON formatında veri ver. Başka hiçbir metin yazma.
     Okuyamadığın sayısal değerlere 0 yaz.
     
     [
-      {"Urun": "Domates", "Miktar": "5 KG", "Fiyat": "25 TL", "Tutar": "125 TL"}
+      {"Urun": "Urun Adi", "Miktar": "5 KG", "Fiyat": "20 TL", "Tutar": "100 TL"}
     ]
     """
-    try:
-        response = model.generate_content([prompt, img])
-        return response.text
-    except Exception as e:
-        return f"Analiz Hatası: {str(e)}"
+    
+    last_error = ""
+    
+    # Modelleri döngüye sok
+    for model_name in models_to_try:
+        try:
+            # Modeli hazırla
+            model = genai.GenerativeModel(model_name)
+            
+            # İsteği gönder
+            response = model.generate_content([prompt, img])
+            
+            # Eğer buraya geldiyse çalışmış demektir
+            return True, response.text, model_name
+            
+        except Exception as e:
+            # Hata aldıysak kaydet ve diğer modele geç
+            last_error = str(e)
+            print(f"{model_name} hata verdi, diğerine geçiliyor...")
+            continue
+            
+    # Hiçbiri çalışmazsa
+    return False, f"Tüm modeller denendi ama başarısız oldu. Son hata: {last_error}", "Yok"
 
 def save_to_sheet(json_text):
     if not client:
-        return False, "Google Sheets bağlantısı kurulamadı. Secrets ayarlarını kontrol et."
+        return False, "Google Sheets bağlantısı yok."
         
     try:
-        # Gelen veriyi temizle (Bazen ```json etiketiyle gelir)
         clean_text = json_text.replace("```json", "").replace("```", "").strip()
         data = json.loads(clean_text)
         
-        # Dosyayı aç
         try:
             sheet = client.open(SHEET_NAME).sheet1
         except:
-            return False, f"'{SHEET_NAME}' isimli Google Sheet dosyası bulunamadı."
+            return False, f"'{SHEET_NAME}' dosyası bulunamadı."
             
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        added_count = 0
-        
+        count = 0
         for item in data:
-            row = [
-                timestamp,
-                item.get("Urun", "-"),
-                item.get("Miktar", "0"),
-                item.get("Fiyat", "0"),
-                item.get("Tutar", "0")
-            ]
+            row = [timestamp, item.get("Urun", "-"), item.get("Miktar", "0"), item.get("Fiyat", "0"), item.get("Tutar", "0")]
             sheet.append_row(row)
-            added_count += 1
-            
-        return True, f"{added_count}"
-        
-    except json.JSONDecodeError:
-        return False, "Fiş okunamadı veya yapay zeka bozuk veri gönderdi. Lütfen tekrar dene."
+            count += 1
+        return True, str(count)
     except Exception as e:
-        return False, f"Kayıt Hatası: {str(e)}"
+        return False, str(e)
 
 # --- ARAYÜZ ---
 st.title("🍅 Mutfak İrsaliye Kayıt")
-
-if model:
-    st.info(f"✅ Sistem Hazır | Aktif Zeka: {model_name}")
-else:
-    st.error("❌ Kritik Hata: Yapay Zeka Başlatılamadı!")
+st.caption("Otomatik Model Değiştiricili Sistem")
 
 uploaded_file = st.file_uploader("İrsaliye Fotoğrafı Yükle", type=['jpg', 'png', 'jpeg'])
 
@@ -139,21 +111,23 @@ if uploaded_file:
     st.image(image, caption="Yüklenen Belge", width=300)
     
     if st.button("Analiz Et ve Kaydet", type="primary"):
-        with st.spinner("Yapay zeka fişi okuyor..."):
-            # 1. Analiz
-            result_text = analyze_image(image)
+        with st.spinner("Yapay zeka modelleri deneniyor..."):
             
-            # Hata kontrolü
-            if "HATA" in result_text or "Hatası" in result_text:
-                st.error(result_text)
-            else:
-                # 2. Kayıt
-                success, msg = save_to_sheet(result_text)
+            # 1. Analiz (Yedekli Sistem)
+            success_ai, ai_result, working_model = analyze_with_fallback(image)
+            
+            if success_ai:
+                st.toast(f"✅ {working_model} modeli başarıyla okudu!", icon="🤖")
                 
-                if success:
+                # 2. Kayıt
+                success_save, msg = save_to_sheet(ai_result)
+                
+                if success_save:
                     st.balloons()
-                    st.success(f"✅ İşlem Tamam! {msg} kalem ürün tabloya işlendi.")
+                    st.success(f"✅ Harika! {msg} kalem ürün Google Sheet'e işlendi.")
                 else:
-                    st.error(f"Hata: {msg}")
-                    with st.expander("Teknik Detay"):
-                        st.code(result_text)
+                    st.error(f"Kayıt Hatası: {msg}")
+            else:
+                st.error("❌ Analiz Başarısız Oldu.")
+                with st.expander("Hata Detayı"):
+                    st.write(ai_result)

@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
-st.set_page_config(page_title="Mutfak Bedava", page_icon="💸")
+st.set_page_config(page_title="Mutfak Evrensel", page_icon="🌍")
 
 # --- AYARLAR ---
 SHEET_NAME = "Mutfak_Takip" 
@@ -24,7 +24,7 @@ def get_gspread_client():
     except Exception as e:
         return None, str(e)
 
-# --- ANALİZ ---
+# --- ANALİZ (EVRENSEL PROMPT) ---
 def analyze_receipt(image, selected_model):
     api_key = st.secrets["GOOGLE_API_KEY"]
     clean_model = selected_model.replace("models/", "")
@@ -36,17 +36,22 @@ def analyze_receipt(image, selected_model):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
+    # PROMPT: 7 FARKLI FİRMA İÇİN GENEL KOMUT
     prompt = """
-    Bu fişi oku.
-    1. TARİHİ bul (GG.AA.YYYY). Yoksa bugünü yaz.
-    2. Ürünleri çıkar.
-    3. Format: TARİH | ÜRÜN | MİKTAR | FİYAT | TUTAR
-    4. Fiyat/Tutar yoksa boş bırakma, 0 yaz.
+    Sen uzman bir veri giriş elemanısın. Bu mal teslim irsaliyesini/fişini analiz et.
+    Belge baskı (print) veya el yazısı olabilir. Tablo yapısını çöz.
     
-    Örnek:
-    30.10.2025 | Bıldırcın | 17.02 KG | 0 | 0
+    KURALLAR:
+    1. Önce TARİHİ bul (GG.AA.YYYY). Belgede yoksa bugünü baz al.
+    2. Sadece ve sadece resimde görünen kalemleri listele. KAFANDAN SATIR EKLEME.
+    3. Ürün isimlerini mantıklı bir şekilde okumaya çalış (Örn: 'Fleto'yu 'Fen Ladesi' yapma, metni düzelt).
+    4. Fiyat/Tutar sütunu yoksa veya boşsa '0' yaz.
     
-    Sadece veriyi ver.
+    ÇIKTI FORMATI:
+    TARİH | ÜRÜN ADI | MİKTAR | BİRİM FİYAT | TOPLAM TUTAR
+    
+    Örnek (Sadece formatı anla diye veriyorum, bunu kopyalama):
+    25.11.2025 | Tavuk But | 15 KG | 0 | 0
     """
 
     payload = {
@@ -62,7 +67,7 @@ def analyze_receipt(image, selected_model):
         return False, "Boş cevap."
     except Exception as e: return False, str(e)
 
-# --- KAYIT (NAZ YAPMAYAN MOD) ---
+# --- KAYIT ---
 def save_to_sheet(raw_text):
     client, email_or_err = get_gspread_client()
     if not client: return False, f"Bağlantı Hatası: {email_or_err}"
@@ -71,81 +76,62 @@ def save_to_sheet(raw_text):
         sheet = client.open(SHEET_NAME).sheet1
         rows_to_add = []
         
-        # Satır satır parçala
         lines = raw_text.split('\n')
         for line in lines:
             clean = line.strip()
-            # İçinde en az bir çizgi varsa işlemeye çalış
             if "|" in clean:
                 parts = [p.strip() for p in clean.split('|')]
                 
-                # Başlık satırıysa atla
-                if "TARİH" in parts[0].upper(): continue
+                # Başlıkları ve Örnek satırları atla
+                if "TARİH" in parts[0].upper() or "ÜRÜN" in parts[1].upper() or "BUT" in parts[1].upper():
+                    continue
                 
-                # BOŞLUKLARI DOLDUR (En kritik kısım burası)
-                # Eğer parça boşsa ("") hemen "0" yapıyoruz.
                 cleaned_parts = [p if p != "" else "0" for p in parts]
+                while len(cleaned_parts) < 5: cleaned_parts.append("0")
                 
-                # 5 Sütuna tamamla
-                while len(cleaned_parts) < 5: 
-                    cleaned_parts.append("0")
-                
-                # Sadece ilk 5 sütunu al (Fazlasını at)
-                final_row = cleaned_parts[:5]
-                
-                rows_to_add.append(final_row)
+                rows_to_add.append(cleaned_parts[:5])
         
         if rows_to_add:
             sheet.append_rows(rows_to_add)
             return True, f"✅ {len(rows_to_add)} satır başarıyla eklendi!"
         else:
-            return False, "⚠️ Eklenecek satır bulunamadı. Metin formatı '|' içermiyor olabilir."
+            return False, "⚠️ Eklenecek satır bulunamadı."
             
     except Exception as e:
         return False, f"Yazma Hatası: {str(e)}"
 
 # --- ARAYÜZ ---
-st.title("💸 Mutfak Bedava (2.5 Flash)")
+st.title("🌍 Mutfak Evrensel (7 Firma)")
 
-# --- YAN MENÜ ---
 with st.sidebar:
-    st.header("🛠️ Ayarlar")
-    if st.button("⚠️ Test Et"):
-        c, _ = get_gspread_client()
-        if c: 
-            try:
-                c.open(SHEET_NAME).sheet1.append_row([str(datetime.now()), "TEST", "OK"])
-                st.success("Test Başarılı!")
-            except: st.error("Dosya Hatası")
-        else: st.error("Bağlantı Hatası")
+    st.header("⚙️ Ayarlar")
+    # Manuel Model Girişi (Hala 2.5 Flash candır)
+    selected_model = st.text_input("Model", "models/gemini-2.5-flash")
+    st.caption("Farklı formatlardaki irsaliyeleri denerken model şaşırırsa, buradan modeli 'models/gemini-exp-1206' yapabilirsin.")
 
-    # Manuel Model Girişi (Senin 2.5 Flash için)
-    selected_model = st.text_input("Model Adı", "models/gemini-2.5-flash")
-
-# --- ANA EKRAN ---
-uploaded_file = st.file_uploader("Fiş Yükle", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("İrsaliye Yükle (Herhangi bir firma)", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, width=300)
     
     if st.button("Analiz Et", type="primary"):
-        with st.spinner("Bıldırcınlar aranıyor..."):
+        with st.spinner("İrsaliye çözümleniyor..."):
             succ, txt = analyze_receipt(image, selected_model)
-            
-            # SESSION STATE KULLANALIM Kİ KAYBOLMASIN
             st.session_state['ocr_result'] = txt
             
-    # Eğer sonuç varsa göster (Butona basılmasa bile sayfada kalsın)
     if 'ocr_result' in st.session_state:
         with st.form("save_form"):
-            st.info("Aşağıdaki veriler Google Sheets'e gidecek:")
+            st.info("Kontrol Et & Kaydet:")
+            # Burada 'Fen Ladesi' gibi hataları elle düzeltebilirsin
             edited = st.text_area("Veriler", st.session_state['ocr_result'], height=100)
             
-            if st.form_submit_button("💾 Bıldırcını Kaydet"):
+            if st.form_submit_button("💾 Kaydet"):
                 s_save, msg = save_to_sheet(edited)
                 if s_save:
                     st.balloons()
                     st.success(msg)
+                    # Kayıt bitince hafızayı temizle ki yeni fişe hazır olsun
+                    del st.session_state['ocr_result'] 
                 else:
                     st.error(msg)

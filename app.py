@@ -1,6 +1,5 @@
 import streamlit as st
 from PIL import Image
-from datetime import datetime
 import requests
 import json
 import base64
@@ -8,9 +7,9 @@ import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-st.set_page_config(page_title="Mutfak Geleceği", page_icon="🍌")
+st.set_page_config(page_title="Mutfak Flash", page_icon="⚡")
 
-# --- GOOGLE SHEETS ---
+# --- GOOGLE SHEETS BAĞLANTISI ---
 def setup_sheets():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -24,46 +23,35 @@ def setup_sheets():
 client = setup_sheets()
 SHEET_NAME = "Mutfak_Takip"
 
-# --- MODELLERİ ÇEK ---
-def list_available_models():
+# --- ANALİZ (TARİHLİ & FLASH DOSTU) ---
+def analyze_receipt(image):
     api_key = st.secrets["GOOGLE_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            # Listeyi alfabetik sırala ki bulması kolay olsun
-            models = sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
-            return models
-        return []
-    except:
-        return []
-
-# --- ANALİZ (SANSÜR KIRICI EKLENDİ) ---
-def analyze_future(image, selected_model):
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    # Model ismindeki "models/" kısmını temizle
-    clean_model = selected_model.replace("models/", "")
+    # KOTA DOSTU MODEL: FLASH (Varsayılan)
+    model_name = "gemini-1.5-flash"
     
-    # Resmi Hazırla
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='JPEG')
     base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
+    # PROMPT: Tarihi bul ve her satırın başına ekle
     prompt = """
-    Sen uzman bir muhasebecisin. Bu mal teslim fişini analiz et.
-    Görevin: Ürün, Miktar, Fiyat ve Tutar bilgilerini çıkarmak.
-    Metin EL YAZISI olabilir, rakamlara dikkat et.
-    Eğer fiyat/tutar yoksa '0' yaz.
+    Sen bir muhasebe asistanısın. Bu irsaliyeyi/fişi oku.
     
-    Çıktı Formatı (Aralara | koy):
-    URUN ADI | MIKTAR | BIRIM FIYAT | TOPLAM TUTAR
+    1. Önce belgenin üzerindeki TARİHİ bul (GG.AA.YYYY formatına çevir).
+    2. Sonra kalem kalem ürünleri çıkar.
+    3. Eğer tarih yoksa bugünün tarihini at.
+    
+    ÇIKTI FORMATI (Aralara | koy):
+    TARİH | ÜRÜN ADI | MİKTAR | BİRİM FİYAT | TOPLAM TUTAR
     
     Örnek:
-    Dana Biftek | 2,5 KG | 0 | 0
+    24.11.2025 | Domates | 5 KG | 10 TL | 50 TL
+    24.11.2025 | Salatalık | 3 KG | 5 TL | 15 TL
+    
+    Not: Her satırın başına tarihi tekrar yaz. Başlık satırı yazma. Sadece veriyi ver.
     """
 
     payload = {
@@ -73,7 +61,6 @@ def analyze_future(image, selected_model):
                 {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
             ]
         }],
-        # İŞTE BURASI ÇOK ÖNEMLİ: GÜVENLİK FİLTRELERİNİ KAPATIYORUZ
         "safetySettings": [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -84,84 +71,88 @@ def analyze_future(image, selected_model):
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
-        
         if response.status_code != 200:
-            return False, f"Hata ({response.status_code}): {response.text}"
+            return False, f"Hata: {response.text}"
             
         result = response.json()
-        
-        # Cevabı al
         if 'candidates' in result and len(result['candidates']) > 0:
-            candidate = result['candidates'][0]
-            # Eğer filtreye takıldıysa 'finishReason' farklı döner
-            if candidate.get('finishReason') == 'SAFETY':
-                return False, "Google Güvenlik Filtresine Takıldı! (Yine de sansür ayarını deldi)"
-                
-            if 'content' in candidate and 'parts' in candidate['content']:
-                return True, candidate['content']['parts'][0]['text']
-        
-        return False, f"Boş Cevap: {str(result)}"
+             candidate = result['candidates'][0]
+             if 'content' in candidate and 'parts' in candidate['content']:
+                 return True, candidate['content']['parts'][0]['text']
+        return False, "Boş cevap."
             
     except Exception as e:
         return False, f"Bağlantı Hatası: {str(e)}"
 
+# --- KAYIT (TARİHİ METİNDEN ALAN VERSİYON) ---
 def save_lines(raw_text):
-    if not client: return False, "Google Sheets Bağlı Değil"
+    if not client: return False, "Sheets Bağlı Değil"
     try:
         sheet = client.open(SHEET_NAME).sheet1
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         count = 0
         
-        for line in raw_text.split('\n'):
-            if "|" in line and len(line) > 5:
-                parts = [p.strip() for p in line.split('|')]
-                # Eksikleri tamamla
-                while len(parts) < 4: parts.append("0")
+        lines = raw_text.split('\n')
+        for line in lines:
+            clean_line = line.strip()
+            # En az 4 tane | işareti varsa (Tarih|Urun|Miktar|Fiyat|Tutar)
+            if "|" in clean_line and clean_line.count("|") >= 3:
                 
-                sheet.append_row([timestamp] + parts[:4])
-                count += 1
+                parts = [p.strip() for p in clean_line.split('|')]
+                
+                # Başlık satırıysa atla
+                if "TARİH" in parts[0].upper() or "URUN" in parts[1].upper():
+                    continue
+                
+                # Eksik sütunları 0 ile doldur (Toplam 5 sütun olmalı)
+                while len(parts) < 5: parts.append("0")
+                
+                # Sheets'e Yaz (İlk 5 sütunu al: Tarih, Ürün, Miktar, Fiyat, Tutar)
+                try:
+                    sheet.append_row(parts[:5])
+                    count += 1
+                except Exception as inner_e:
+                    # 200 hatasını yut (Başarıdır)
+                    if "200" in str(inner_e):
+                        count += 1
+                        continue
+                    else:
+                        return False, str(inner_e)
+                        
         return True, str(count)
-    except Exception as e: return False, str(e)
+    except Exception as e: 
+        if "200" in str(e): return True, "Başarılı"
+        return False, str(e)
 
 # --- ARAYÜZ ---
-st.title("🍌 Mutfak Geleceği (Pro)")
+st.title("⚡ Mutfak Flash (Hızlı & Tarihli)")
+st.info("Aktif Model: Gemini 1.5 Flash (Kota Dostu)")
 
-with st.sidebar:
-    if st.button("Modelleri Tara"):
-        st.session_state['models'] = list_available_models()
-    
-    # Listeyi session'dan al
-    models_list = st.session_state.get('models', [])
-    
-    # Eğer liste boşsa manuel giriş kutusu koy (Garanti olsun)
-    if not models_list:
-        selected_model = st.text_input("Model Adı (Elle Yaz)", "gemini-exp-1206")
-    else:
-        # En iyi modeli varsayılan yapmaya çalış
-        default_index = 0
-        if 'models/gemini-exp-1206' in models_list:
-            default_index = models_list.index('models/gemini-exp-1206')
-            
-        selected_model = st.selectbox("Model Seç", models_list, index=default_index)
-
-uploaded_file = st.file_uploader("İrsaliye", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("Fiş Yükle", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, width=300)
     
-    if st.button("Analiz Et (Filtresiz)", type="primary"):
-        with st.spinner(f"{selected_model} çalışıyor..."):
-            success, result = analyze_future(image, selected_model)
-            
-            with st.expander("Sonuç Metni"):
-                if success: st.success(result)
-                else: st.error(result)
+    if st.button("Analiz Et", type="primary"):
+        with st.spinner("Tarih ve ürünler okunuyor..."):
+            success, result_text = analyze_receipt(image)
             
             if success:
-                s_save, msg = save_lines(result)
-                if s_save:
-                    st.balloons()
-                    st.success(f"✅ {msg} satır kaydedildi!")
-                else:
-                    st.error(f"Kayıt Hatası: {msg}")
+                st.toast("Okuma yapıldı, lütfen kontrol et.")
+                
+                # DÜZELTME ALANI (Ana Formun İçine Aldık)
+                with st.form("duzeltme_formu"):
+                    st.write("▼ **Aşağıdaki kutudan hataları düzeltip KAYDET'e bas:**")
+                    edited_text = st.text_area("Düzenle", result_text, height=150, help="Format: Tarih | Ürün | Miktar | Fiyat | Tutar")
+                    
+                    submit_btn = st.form_submit_button("✅ Google Sheets'e Kaydet")
+                    
+                    if submit_btn:
+                        save_success, msg = save_lines(edited_text)
+                        if save_success:
+                            st.balloons()
+                            st.success(f"Kaydedildi! {msg} satır işlendi.")
+                        else:
+                            st.error(f"Kayıt Hatası: {msg}")
+            else:
+                st.error("Okuma Başarısız. Lütfen tekrar dene.")

@@ -1,17 +1,19 @@
-# utils.py
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
 import re
 import difflib
+import requests
 
-# --- AYARLAR ---
+# AYARLAR
 SHEET_NAME = "Mutfak_Takip"
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 SETTINGS_SHEET_NAME = "AYARLAR"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
+SHEET_YATILI = "OGRENCI_YATILI"
+SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
 
-# --- GÜVENLİK ---
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     def password_entered():
@@ -20,32 +22,23 @@ def check_password():
             del st.session_state["password"]
         else: st.session_state["password_correct"] = False
     if not st.session_state["password_correct"]:
-        st.text_input("Şifre:", type="password", on_change=password_entered, key="password")
+        st.text_input("🔑 Şifre:", type="password", on_change=password_entered, key="password")
         return False
     return True
 
-# --- BAĞLANTILAR ---
 def get_gspread_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        return client, creds_dict.get("client_email")
-    except Exception as e: return None, str(e)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        return gspread.authorize(creds)
+    except Exception as e: return None
 
-def get_or_create_worksheet(sh, title, cols, header):
+def get_drive_service():
     try:
-        for ws in sh.worksheets():
-            if turkish_lower(ws.title) == turkish_lower(title): return ws
-        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
-        ws.append_row(header)
-        return ws
-    except Exception as e:
-        if "already exists" in str(e): return sh.worksheet(title)
-        return None
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), ['https://www.googleapis.com/auth/drive'])
+        return build('drive', 'v3', credentials=creds)
+    except: return None
 
-# --- METİN İŞLEME ---
 def clean_number(num_str):
     try:
         clean = re.sub(r'[^\d.,-]', '', str(num_str))
@@ -72,6 +65,16 @@ def find_best_match(ocr_text, db_list, cutoff=0.6):
     ocr_key = turkish_lower(ocr_text)
     db_keys = [turkish_lower(p) for p in db_list]
     matches = difflib.get_close_matches(ocr_key, db_keys, n=1, cutoff=cutoff)
-    if matches:
-        return db_list[db_keys.index(matches[0])]
+    if matches: return db_list[db_keys.index(matches[0])]
     return None
+
+def get_or_create_worksheet(sh, title, cols, header):
+    try:
+        for ws in sh.worksheets():
+            if turkish_lower(ws.title) == turkish_lower(title): return ws
+        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
+        ws.append_row(header)
+        return ws
+    except Exception as e:
+        if "already exists" in str(e): return sh.worksheet(title)
+        return None

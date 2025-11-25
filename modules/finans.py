@@ -37,18 +37,15 @@ def get_current_unit_price():
             last_row = all_rows[-1] 
             raw_price = last_row[1] 
             s_price = str(raw_price).replace("₺", "").replace("TL", "").strip()
-            if not s_price:
-                return 0.0
+            if not s_price: return 0.0
             if "." in s_price and "," not in s_price:
                  temp_val = float(s_price.replace(".", ""))
-                 if temp_val > 1000:
-                     return temp_val / 100
+                 if temp_val > 1000: return temp_val / 100
             if "," in s_price:
                 s_price = s_price.replace(".", "").replace(",", ".") 
             return float(s_price)
         return 0.0
-    except:
-        return 0.0
+    except: return 0.0
 
 def update_unit_price(new_price, year):
     try:
@@ -117,8 +114,7 @@ def distribute_yatili_installments(total_fee, year):
         existing_classes = [] 
         start_index = 0
         first_cell = all_values[0][0].lower() if all_values[0] else ""
-        if "ad" in first_cell or "isim" in first_cell or "name" in first_cell:
-            start_index = 1
+        if "ad" in first_cell or "isim" in first_cell or "name" in first_cell: start_index = 1
             
         for row in all_values[start_index:]:
             if row and row[0].strip():
@@ -126,8 +122,7 @@ def distribute_yatili_installments(total_fee, year):
                 cls = row[1].strip() if len(row) > 1 else ""
                 existing_classes.append(cls)
         
-        if not student_names:
-            return False, "Öğrenci bulunamadı."
+        if not student_names: return False, "Öğrenci bulunamadı."
 
         installment_amount = total_fee / 4.0
         new_data = [["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Odenen_Toplam", "Kalan_Borc", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]]
@@ -153,25 +148,21 @@ def process_yatili_payment(analiz, dekont_link):
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_YATILI)
-        
         all_data = ws.get_all_records()
         df = pd.DataFrame(all_data)
         
         aranan_isim = analiz.get('ogrenci_ad', '')
-        if not aranan_isim:
-            return False, "İsim bulunamadı.", 0
+        if not aranan_isim: return False, "İsim bulunamadı.", 0
             
         mevcut_isimler = df['Ad_Soyad'].tolist()
         bulunan_isim = find_best_match(aranan_isim, mevcut_isimler)
-        if not bulunan_isim:
-            return False, f"'{aranan_isim}' bulunamadı.", 0
+        if not bulunan_isim: return False, f"'{aranan_isim}' bulunamadı.", 0
             
         row_index = df[df['Ad_Soyad'] == bulunan_isim].index[0]
         sheet_row_num = row_index + 2 
         
         current_paid = df.at[row_index, 'Odenen_Toplam']
-        if current_paid == '' or current_paid is None:
-            current_paid = 0
+        if current_paid == '' or current_paid is None: current_paid = 0
         current_paid = float(str(current_paid).replace(',', '').strip() or 0)
         
         total_fee = df.at[row_index, 'Toplam_Yillik_Ucret']
@@ -179,8 +170,7 @@ def process_yatili_payment(analiz, dekont_link):
         
         taksit_tutari = total_fee / 4.0 if total_fee > 0 else 1
         tahmini_taksit_no = int(current_paid / taksit_tutari) + 1
-        if tahmini_taksit_no > 4:
-            tahmini_taksit_no = "Ekstra"
+        if tahmini_taksit_no > 4: tahmini_taksit_no = "Ekstra"
         
         payment_amount = float(analiz.get('tutar', 0))
         new_total_paid = current_paid + payment_amount
@@ -247,12 +237,21 @@ def sanitize_filename(name):
     return safe.strip()
 
 def move_and_rename_file_in_drive(service, file_id, source_folder_id, destination_folder_id, new_name=None):
+    """
+    Dosyayı taşır ve opsiyonel olarak YENİDEN ADLANDIRIR.
+    DÜZELTME: addParents ve removeParents BODY'nin dışında olmalı!
+    """
     try:
-        file_metadata = {'addParents': destination_folder_id, 'removeParents': source_folder_id}
+        # İsim değişikliği için Metadata Body
+        file_metadata = {}
         if new_name:
             file_metadata['name'] = sanitize_filename(new_name)
+            
+        # API Çağrısı - Parametreler doğru yerlerinde!
         service.files().update(
             fileId=file_id,
+            addParents=destination_folder_id, 
+            removeParents=source_folder_id,
             body=file_metadata,
             fields='id, parents, name'
         ).execute()
@@ -284,8 +283,7 @@ def render_page(selected_model):
             c1.metric("Toplam Yıllık Beklenti", f"{toplam_borc:,.2f} ₺")
             c2.metric("Tahsilat", f"{toplam_odenen:,.2f} ₺", delta=f"{toplam_odenen - toplam_borc:,.2f} ₺")
             st.dataframe(df_yatili, use_container_width=True)
-        else:
-            st.warning("Veri yok.")
+        else: st.warning("Veri yok.")
 
     # --- TAB 2: GÜNDÜZLÜ ---
     with tab2:
@@ -294,18 +292,15 @@ def render_page(selected_model):
             if 'Ay' in df_g.columns:
                 aylar = sorted(df_g['Ay'].unique(), reverse=True)
                 secilen = st.selectbox("Dönem:", aylar) if aylar else None
-                if secilen:
-                    df_g = df_g[df_g['Ay'] == secilen]
+                if secilen: df_g = df_g[df_g['Ay'] == secilen]
             st.dataframe(df_g, use_container_width=True)
-        else:
-            st.warning("Veri yok.")
+        else: st.warning("Veri yok.")
 
     # --- TAB 3: DEKONT İŞLEME ---
     with tab3:
         st.subheader("🤖 Dekont Analiz & Arşivleme")
         service = get_drive_service()
-        if not service:
-            st.stop()
+        if not service: st.stop()
 
         root_id = find_folder_id(service, "Mutfak_ERP_Drive")
         finans_id = find_folder_id(service, "Finans", parent_id=root_id)
@@ -314,15 +309,9 @@ def render_page(selected_model):
         arsiv_yatili_id = find_folder_id(service, "Arsiv_Yatili", parent_id=finans_id)
         arsiv_gunduzlu_id = find_folder_id(service, "Arsiv_Gunduzlu", parent_id=finans_id)
         
-        if not gelen_id:
-            st.error("'Gelen_Dekontlar' klasörü yok!")
-            st.stop()
-        if not arsiv_yatili_id:
-            st.error("Drive'da 'Arsiv_Yatili' klasörünü oluşturun!")
-            st.stop()
-        if not arsiv_gunduzlu_id:
-            st.error("Drive'da 'Arsiv_Gunduzlu' klasörünü oluşturun!")
-            st.stop()
+        if not gelen_id: st.error("Gelen_Dekontlar yok!"); st.stop()
+        if not arsiv_yatili_id: st.error("Arsiv_Yatili yok!"); st.stop()
+        if not arsiv_gunduzlu_id: st.error("Arsiv_Gunduzlu yok!"); st.stop()
 
         results = service.files().list(q=f"'{gelen_id}' in parents and trashed=false", fields="files(id, name, mimeType)").execute()
         files = results.get('files', [])
@@ -342,8 +331,7 @@ def render_page(selected_model):
                         st.session_state['last_file_id'] = sel_id
                         st.success("Analiz Bitti!")
                         st.json(res)
-                    else:
-                        st.error("Analiz başarısız.")
+                    else: st.error("Analiz başarısız.")
 
             if st.session_state.get('last_analysis') and st.session_state.get('last_file_id') == sel_id:
                 analiz = st.session_state['last_analysis']
@@ -377,8 +365,7 @@ def render_page(selected_model):
                                 msg = "Gündüzlü'ye işlendi."
                                 hedef_klasor = arsiv_gunduzlu_id
                                 yeni_isim = f"{temiz_ad}_Yemek_{tarih}{ext}"
-                            else:
-                                msg = "Sheet hatası."
+                            else: msg = "Sheet hatası."
 
                         elif analiz['tur_tahmini'] == 'TAKSİT':
                             is_ok, txt, taksit_no = process_yatili_payment(analiz, link)
@@ -387,8 +374,7 @@ def render_page(selected_model):
                                 msg = txt
                                 hedef_klasor = arsiv_yatili_id
                                 yeni_isim = f"{temiz_ad}_Taksit{taksit_no}{ext}"
-                            else:
-                                msg = txt
+                            else: msg = txt
 
                         if basari and hedef_klasor:
                             if move_and_rename_file_in_drive(service, sel_id, gelen_id, hedef_klasor, new_name=yeni_isim):
@@ -397,10 +383,8 @@ def render_page(selected_model):
                                 del st.session_state['last_analysis']
                                 del st.session_state['last_file_id']
                                 st.rerun()
-                            else:
-                                st.error("Veri işlendi ama dosya taşınamadı.")
-                        elif not basari:
-                            st.error(f"Başarısız: {msg}")
+                            else: st.error("Veri işlendi ama dosya taşınamadı.")
+                        elif not basari: st.error(f"Başarısız: {msg}")
 
     # --- TAB 4: AYARLAR ---
     with tab4:
@@ -411,8 +395,7 @@ def render_page(selected_model):
             np = st.number_input("Yeni Fiyat", value=curr_p)
             yil = st.number_input("Yıl", value=2025)
             if st.form_submit_button("Güncelle"):
-                update_unit_price(np, yil)
-                st.rerun()
+                update_unit_price(np, yil); st.rerun()
         
         st.divider()
         st.write("Gündüzlü Tahakkuk")
@@ -424,9 +407,7 @@ def render_page(selected_model):
         st.write(f"Tahmini Ciro: {tutar} x Öğrenci Sayısı")
         if st.button("Tahakkuk Başlat"):
             n = generate_monthly_accrual(sec_ay, gun, curr_p)
-            if n > 0:
-                st.success(f"{n} kayıt eklendi.")
-                st.rerun()
+            if n > 0: st.success(f"{n} kayıt eklendi."); st.rerun()
 
         st.divider()
         st.write("Yatılı Taksit Sıfırlama")
@@ -434,8 +415,5 @@ def render_page(selected_model):
             toplam = st.number_input("Yıllık Ücret", 20000.0)
             if st.form_submit_button("Dağıt"):
                 ok, m = distribute_yatili_installments(toplam, yil)
-                if ok:
-                    st.success(m)
-                    st.rerun()
-                else:
-                    st.error(m)
+                if ok: st.success(m); st.rerun()
+                else: st.error(m)

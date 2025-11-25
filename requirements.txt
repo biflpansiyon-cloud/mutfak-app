@@ -1,7 +1,8 @@
 streamlit
-requests
 gspread
 oauth2client
-Pillow
+google-api-python-client
 pandas
+Pillow
 xlsxwriter
+requests

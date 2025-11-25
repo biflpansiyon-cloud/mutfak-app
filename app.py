@@ -1,24 +1,23 @@
 import streamlit as st
-from utils import check_password
+# modules paketinden utils ve diğerlerini çağırıyoruz
+from modules.utils import check_password
+from modules import irsaliye, fatura, menu, finans
 
-# Sayfa Ayarları
-st.set_page_config(page_title="Mutfak ERP V21", page_icon="🏛️", layout="wide")
+# Sayfa Ayarı
+st.set_page_config(page_title="Mutfak ERP Modular", page_icon="💎", layout="wide")
 
-# 1. Güvenlik Kontrolü (Utils'den gelir)
+# 1. Güvenlik
 if not check_password():
     st.stop()
 
-# 2. Modülleri Çağır
-from modules import irsaliye, fatura, menu, finans
-
-# 3. Yan Menü (Navigasyon)
+# 2. Kenar Çubuğu
 with st.sidebar:
     st.title("Mutfak ERP")
-    if st.button("🔒 Güvenli Çıkış"):
+    if st.button("🔒 Çıkış"):
         st.session_state.clear()
         st.rerun()
         
-    page = st.radio("Menü", [
+    page = st.radio("Modül Seç", [
         "📝 Günlük İrsaliye", 
         "🧾 Fatura & Fiyat", 
         "📅 Menü Planlayıcı",
@@ -27,9 +26,9 @@ with st.sidebar:
     
     st.divider()
     models = ["models/gemini-2.5-flash", "models/gemini-exp-1206", "models/gemini-1.5-flash"]
-    sel_model = st.selectbox("Yapay Zeka Modeli", models)
+    sel_model = st.selectbox("Yapay Zeka", models)
 
-# 4. Sayfa Yönlendirme (Trafik Polisi)
+# 3. Yönlendirme
 if page == "📝 Günlük İrsaliye":
     irsaliye.render_page(sel_model)
 

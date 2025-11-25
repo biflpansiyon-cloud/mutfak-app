@@ -7,3 +7,4 @@ Pillow
 xlsxwriter
 requests
 google-generativeai
+extra-streamlit-components

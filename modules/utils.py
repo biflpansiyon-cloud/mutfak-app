@@ -37,11 +37,36 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except Exception as e: return None
 
+# modules/utils.py içine eklenecek/güncellenecek:
+
 def get_drive_service():
+    """Google Drive API servisini başlatır."""
+    scope = ['https://www.googleapis.com/auth/drive']
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), ['https://www.googleapis.com/auth/drive'])
-        return build('drive', 'v3', credentials=creds)
-    except: return None
+        # Streamlit secrets'tan credentials oluştur
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        service = build('drive', 'v3', credentials=creds)
+        return service
+    except Exception as e:
+        st.error(f"Drive Bağlantı Hatası: {e}")
+        return None
+
+def find_folder_id(service, folder_name, parent_id=None):
+    """İsmi verilen klasörün ID'sini bulur."""
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        if parent_id:
+            query += f" and '{parent_id}' in parents"
+        
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        if files:
+            return files[0]['id'] # İlk bulduğunu döndür
+        return None
+    except Exception as e:
+        st.error(f"Klasör arama hatası ({folder_name}): {e}")
+        return None
 
 # modules/utils.py dosyasına eklenecek:
 

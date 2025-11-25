@@ -26,58 +26,74 @@ def get_data(sheet_name):
         # st.error(f"Veri çekme hatası ({sheet_name}): {e}") # Hata mesajını gizleyelim
         return pd.DataFrame()
 
-# modules/finans.py içinde get_current_unit_price fonksiyonunu GÜNCELLE
+# modules/finans.py içinde değiştirilecek 2 fonksiyon:
 
 def get_current_unit_price():
     """
-    FINANS_AYARLAR sayfasından güncel birim fiyatı çeker.
-    Nokta/Virgül ayrımını akıllıca yapar.
+    FINANS_AYARLAR sayfasından veriyi çeker.
+    Sheets'ten gelen veri "73,15" (yazı) de olsa, 73,15 (sayı) da olsa,
+    hatta 7.315 (hatalı sayı) da olsa doğru formata (73.15) zorlar.
     """
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_SETTINGS)
         
-        records = ws.get_all_records()
-        if records:
-            last_record = records[-1]
-            raw_price = last_record.get('Birim_Fiyat', 0)
+        # get_all_values() kullanıyoruz ki ham veriyi (string) görelim, yorum katmasın.
+        all_rows = ws.get_all_values()
+        
+        # Başlık hariç veri varsa
+        if len(all_rows) > 1:
+            last_row = all_rows[-1] # En son satır
+            # Sütun sırası: [Yil, Birim_Fiyat, ...] -> 2. eleman (index 1)
+            raw_price = last_row[1] 
             
-            # 1. Zaten Sayıysa (Float/Int) direkt döndür
-            if isinstance(raw_price, (float, int)):
-                return float(raw_price)
+            # Gelen veriyi string'e çevirip temizleyelim
+            s_price = str(raw_price).replace("₺", "").replace("TL", "").strip()
             
-            # 2. Yazıysa (String) analiz et
-            s_price = str(raw_price).strip()
+            # Eğer boşsa
+            if not s_price: return 0.0
+
+            # EĞER 7.315 GİBİ BİR SAYI GELDİYSE VE BİZ BUNUN 1000'DEN KÜÇÜK OLMASI GEREKTİĞİNİ BİLİYORSAK
+            # (Bu kısım, geçmişte yanlış kaydedilen 7315'leri düzeltmek için bir yamadır)
+            if "." in s_price and "," not in s_price:
+                 # Noktayı silip sayıya çevirmeyi dene
+                 temp_val = float(s_price.replace(".", ""))
+                 # Eğer birim fiyat 1000 TL'den büyükse, muhtemelen yanlışlıkla 100 ile çarpılmıştır.
+                 if temp_val > 1000:
+                     return temp_val / 100
             
-            if ',' in s_price:
-                # Virgül varsa Türk formatıdır (73,15 veya 1.000,50)
-                # Noktaları sil (binlik), Virgülü nokta yap (ondalık)
-                s_price = s_price.replace('.', '').replace(',', '.')
-            
-            # Virgül yoksa ama Nokta varsa (73.15) -> Dokunma, zaten doğru formattır.
+            # STANDART DÜZELTME (Virgüllü gelirse)
+            # "73,15" -> "73.15" yap
+            if "," in s_price:
+                s_price = s_price.replace(".", "") # Binlik noktalarını at
+                s_price = s_price.replace(",", ".") # Virgülü ondalık yap
             
             return float(s_price)
             
         return 0.0
-    except: 
+    except Exception as e:
+        # Hata durumunda log basabiliriz ama kullanıcıya 0 dönelim
+        print(f"Hata: {e}")
         return 0.0
 
-# modules/finans.py içinde update_unit_price fonksiyonunu bununla değiştir:
-
 def update_unit_price(new_price, year):
-    """Yeni birim fiyatı Sheets'e kaydeder (Türkçe format zorlaması ile)."""
+    """
+    Yeni birim fiyatı Sheets'e kaydeder.
+    Python'daki 73.15 sayısını, Sheets'e "73,15" (YAZI) olarak zorla gönderir.
+    Böylece Sheets bunu 7315 sanmaz.
+    """
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_SETTINGS)
         
-        # FIX: Python float (73.15) -> Türkçe String ("73,15")
-        # Böylece Sheets bunu binlik sayı sanmaz, ondalık olarak kaydeder.
-        price_tr_format = f"{new_price:.2f}".replace('.', ',')
+        # PÜF NOKTASI BURASI:
+        # Sayıyı önce virgüle çeviriyoruz: 73.15 -> "73,15"
+        price_tr_string = f"{new_price:.2f}".replace('.', ',')
         
-        # String olarak gönderiyoruz, Sheets bunu sayıya kendi çevirir
-        ws.append_row([year, price_tr_format, ''], value_input_option='USER_ENTERED') 
+        # value_input_option='USER_ENTERED' sayesinde Sheets bunu "Klavyeden 73,15 yazılmış" gibi algılar.
+        ws.append_row([year, price_tr_string, ''], value_input_option='USER_ENTERED') 
         return True
     except Exception as e:
         st.error(f"Birim fiyat güncelleme hatası: {e}")

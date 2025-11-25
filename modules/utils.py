@@ -43,6 +43,20 @@ def get_drive_service():
         return build('drive', 'v3', credentials=creds)
     except: return None
 
+# modules/utils.py dosyasına eklenecek:
+
+def fetch_google_models():
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            # Sadece içerik üreten (generateContent) modelleri alıp sıralıyoruz
+            return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
+        return []
+    except: return []
+
 # --- TEMİZLİK VE DÜZENLEME ---
 def clean_number(num_str):
     try:

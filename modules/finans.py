@@ -165,21 +165,32 @@ def render_page(selected_model):
             st.dataframe(df_gunduzlu, use_container_width=True)
 
     # --- TAB 3: SİHİRLİ BÖLÜM ---
+    # modules/finans.py içinde, render_page fonksiyonundaki TAB 3 bloğu GÜNCELLENMİŞTİR:
+
+    # --- TAB 3: SİHİRLİ BÖLÜM ---
     with tab3:
         st.subheader("🤖 Otomatik Dekont Analizi")
+        
+        # ... (Önceki kod: Drive servisini başlatma ve klasör ID'lerini bulma) ...
+        # (Bu kısım aynı kalacak, sadece Islenenler klasör ID'sini ekliyoruz)
         
         service = get_drive_service()
         if not service:
             st.warning("Drive servisi başlatılamadı.")
             return
 
-        # Klasörleri bul
+        # Klasörleri bul (Islenenler klasörünü de buluyoruz)
         root_id = find_folder_id(service, "Mutfak_ERP_Drive")
         finans_id = find_folder_id(service, "Finans", parent_id=root_id)
         target_id = find_folder_id(service, "Gelen_Dekontlar", parent_id=finans_id)
+        processed_id = find_folder_id(service, "Islenenler", parent_id=finans_id) # YENİ
         
+        if not processed_id:
+             st.error("❌ 'Islenenler' klasörü bulunamadı. Lütfen 'Finans' içine bu klasörü açın.")
+             return
+             
         if target_id:
-            # Dosyaları listele
+            # ... (Önceki kod: Dosyaları listeleme) ...
             results = service.files().list(
                 q=f"'{target_id}' in parents and trashed=false",
                 fields="files(id, name, mimeType)"
@@ -189,32 +200,57 @@ def render_page(selected_model):
             st.info(f"📂 İşlenmeyi bekleyen **{len(files)}** dekont bulundu.")
             
             if files:
-                # Seçim kutusu (Hepsini mi yapalım tek tek mi?)
                 selected_file_id = st.selectbox("Analiz edilecek dosyayı seçin:", 
                                               options=[f['id'] for f in files],
                                               format_func=lambda x: next((f['name'] for f in files if f['id'] == x), x))
                 
                 selected_file_meta = next((f for f in files if f['id'] == selected_file_id), None)
                 
+                # Sadece analiz yap butonu
                 if st.button("🚀 Bu Dekontu Analiz Et"):
+                    # ... (Analiz kodu, aynı kalacak) ...
+                    # Buraya analiz sonucunu st.session_state'e kaydetme mantığını ekleyelim
+                    
                     with st.spinner("Dosya indiriliyor ve Gemini'ye gönderiliyor..."):
-                        # 1. Dosyayı İndir
                         file_data = download_file_from_drive(service, selected_file_id)
-                        
                         if file_data:
-                            # 2. Gemini'ye Sor
-                            analiz_sonucu = analyze_receipt_with_gemini(
-                                file_data, 
-                                selected_file_meta['mimeType'], 
-                                selected_model
-                            )
-                            
+                            analiz_sonucu = analyze_receipt_with_gemini(file_data, selected_file_meta['mimeType'], selected_model)
                             if analiz_sonucu:
+                                st.session_state['last_analysis'] = analiz_sonucu # Sonucu session'a kaydet
+                                st.session_state['last_file_id'] = selected_file_id
                                 st.success("✅ Analiz Tamamlandı!")
                                 st.json(analiz_sonucu)
-                                
-                                st.info("ℹ️ Bu veriyi veritabanına kaydetme özelliği bir sonraki adımda eklenecek.")
                             else:
                                 st.error("Analizden sonuç dönmedi.")
-        else:
-            st.error("Klasör yapısı bulunamadı (Adım 2'deki klasörleri kontrol et).")
+                        
+                # --- YENİ BÖLÜM: KAYDET VE TAŞI ---
+                
+                if st.session_state.get('last_analysis') and st.session_state.get('last_file_id') == selected_file_id:
+                    st.subheader("İşlem Onayı")
+                    analiz = st.session_state['last_analysis']
+                    
+                    st.warning(f"⚠️ Dekont tahmini **{analiz['tur_tahmini']}** olarak belirlendi. Lütfen kontrol edin.")
+                    
+                    if st.button("💾 Veritabanına Kaydet ve Drive'da Taşı"):
+                        
+                        # 1. Kaydetme İşlemi (Şimdilik sadece YEMEK'i Gündüzlü Sheet'e yazıyoruz)
+                        if analiz['tur_tahmini'] == 'YEMEK':
+                            # Drive'dan dosya linkini al (Kayıt için lazım)
+                            dekont_link = f"https://drive.google.com/file/d/{selected_file_id}/view?usp=drivesdk" 
+                            
+                            if write_to_gunduzlu_sheet(analiz, dekont_link):
+                                st.success("1/2: Veri Gündüzlü Sheet'e başarıyla kaydedildi!")
+                                
+                                # 2. Taşıma İşlemi
+                                if move_file_in_drive(service, selected_file_id, target_id, processed_id):
+                                    st.success("2/2: Dosya 'Islenenler' klasörüne taşındı. İşlem tamamlandı.")
+                                    # Başarılı olunca session state'i temizle ve sayfayı yenile
+                                    del st.session_state['last_analysis']
+                                    del st.session_state['last_file_id']
+                                    st.rerun() 
+                                else:
+                                    st.error("2/2: Dosya taşıma başarısız oldu.")
+                            else:
+                                st.error("1/2: Sheets'e kaydetme başarısız oldu.")
+                        else:
+                            st.error("Bu TAKSİT ödemesidir. Şu an sadece YEMEK ödemeleri otomatik kaydedilmektedir.")

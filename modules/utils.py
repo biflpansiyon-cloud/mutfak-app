@@ -5,7 +5,7 @@ from googleapiclient.discovery import build
 import re
 import difflib
 import streamlit as st
-import extra_streamlit_components as stx # YENİ KÜTÜPHANE
+import extra_streamlit_components as stx
 import datetime
 
 # --- AYARLAR ---
@@ -22,26 +22,23 @@ SHEET_SETTINGS = "FINANS_AYARLAR"
 # --- GÜVENLİK ---
 # modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali
 
-# Cookie yöneticisini önbelleğe alıyoruz ki her defasında yeniden yüklemesin
-@st.cache_resource
-def get_manager():
-    return stx.CookieManager()
+# --- DİKKAT: get_manager fonksiyonunu ve @st.cache satırını SİLDİK ---
 
 def check_password():
     """
-    Şifre girişini yönetir (Çerez destekli).
+    Şifre girişini yönetir (Çerez destekli - Cache olmadan).
     """
-    cookie_manager = get_manager()
-    
-    # Çerezlerin yüklenmesi için kısa bir bekleme (Streamlit senkronizasyonu için)
-    # cookies = cookie_manager.get_all() # Bazen gerekebilir ama aşağısı genelde yeterli
+    # Yöneticisi direkt burada çağırıyoruz. Key vermek karışıklığı önler.
+    cookie_manager = stx.CookieManager(key="giris_cerezleri")
     
     # 1. ÇEREZ KONTROLÜ
-    # Eğer tarayıcıda 'auth_status' çerezi varsa ve değeri 'true' ise direkt içeri al
-    if cookie_manager.get(cookie="auth_status") == "true":
+    # Tarayıcıda çerez var mı diye bakıyoruz
+    cookie_val = cookie_manager.get(cookie="auth_status")
+    
+    if cookie_val == "true":
         return True
     
-    # 2. SESSION KONTROLÜ (Sayfa yenilenmeden gezinmeler için)
+    # 2. SESSION KONTROLÜ
     if st.session_state.get("authenticated", False):
         return True
     
@@ -49,7 +46,6 @@ def check_password():
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
         password = st.text_input("Şifrenizi Girin:", type="password")
-        # Beni Hatırla Kutucuğu
         remember_me = st.checkbox("Beni 7 gün boyunca hatırla") 
         submitted = st.form_submit_button("Giriş Yap")
 
@@ -59,7 +55,7 @@ def check_password():
         if password == expected_password: 
             st.session_state["authenticated"] = True
             
-            # Eğer "Beni Hatırla" seçildiyse Çerezi Kaydet (7 Günlük)
+            # Beni Hatırla seçildiyse çerezi yaz
             if remember_me:
                 expires = datetime.datetime.now() + datetime.timedelta(days=7)
                 cookie_manager.set("auth_status", "true", expires_at=expires)

@@ -1,71 +1,54 @@
+# modules/utils.py (ESKİ SAĞLAM VERSİYON)
+
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 import re
 import difflib
-import streamlit as st
-import extra_streamlit_components as stx
-import datetime
+import requests
 
-# --- AYARLAR ---
+# ... (Sheet adları ve diğer sabitler aynen kalsın) ...
 SHEET_NAME = "Mutfak_Takip"
-PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
-SETTINGS_SHEET_NAME = "AYARLAR"
-MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
-# modules/utils.py içine
-SHEET_SETTINGS = "FINANS_AYARLAR" 
-# ... (diğer sheet adları) ...
+SHEET_SETTINGS = "FINANS_AYARLAR"
 
-# --- GÜVENLİK ---
-# modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali
-
-# --- DİKKAT: get_manager fonksiyonunu ve @st.cache satırını SİLDİK ---
-
+# --- check_password FONKSİYONUNU BU HALİYLE DEĞİŞTİR ---
 def check_password():
     """
-    Şifre girişini yönetir (Çerez destekli - Cache olmadan).
+    Şifre girişini yönetir. (Session State Kullanır - En Stabil Yöntem)
     """
-    # Yöneticisi direkt burada çağırıyoruz. Key vermek karışıklığı önler.
-    cookie_manager = stx.CookieManager(key="giris_cerezleri")
-    
-    # 1. ÇEREZ KONTROLÜ
-    # Tarayıcıda çerez var mı diye bakıyoruz
-    cookie_val = cookie_manager.get(cookie="auth_status")
-    
-    if cookie_val == "true":
-        return True
-    
-    # 2. SESSION KONTROLÜ
+    # 1. OTURUM KONTROLÜ
+    # Eğer kullanıcı zaten girdiyse (session_state True ise), direkt True döndür.
     if st.session_state.get("authenticated", False):
         return True
     
-    # 3. YETKİ YOKSA FORMU GÖSTER
+    # 2. YETKİ YOKSA FORMU GÖSTER
+    # Formu with bloğu içinde kuruyoruz ki Enter tuşu çalışsın.
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
+        
         password = st.text_input("Şifrenizi Girin:", type="password")
-        remember_me = st.checkbox("Beni 7 gün boyunca hatırla") 
         submitted = st.form_submit_button("Giriş Yap")
 
+    # 3. GİRİŞ KONTROLÜ
     if submitted:
+        # Şifre kontrolü
         expected_password = st.secrets.get("APP_PASSWORD", "varsayilan_sifre")
         
         if password == expected_password: 
             st.session_state["authenticated"] = True
-            
-            # Beni Hatırla seçildiyse çerezi yaz
-            if remember_me:
-                expires = datetime.datetime.now() + datetime.timedelta(days=7)
-                cookie_manager.set("auth_status", "true", expires_at=expires)
-            
-            st.rerun()
+            st.success("Giriş Başarılı!")
+            st.rerun() # Sayfayı yenileyip içeri al
             return True
         else:
             st.error("Yanlış şifre. Tekrar deneyin.")
             
+    # Eğer yetki yoksa ve giriş yapılmadıysa False döner
     return False
+
+# ... (Geri kalan get_gspread_client vb. fonksiyonlar aynen kalsın) ...
 
 # --- BAĞLANTILAR ---
 def get_gspread_client():

@@ -29,31 +29,46 @@ def get_data(sheet_name):
 # modules/finans.py içinde, get_current_unit_price fonksiyonu GÜNCELLENDİ
 
 def get_current_unit_price():
-    """FINANS_AYARLAR sayfasından güncel birim fiyatı çekerken, Türkçe formatı temizler."""
+    """
+    FINANS_AYARLAR sayfasından güncel birim fiyatı çeker.
+    Hem sayı (float) hem metin (string) formatını akıllıca yönetir.
+    """
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_SETTINGS)
+        
+        # Tüm kayıtları çekiyoruz
         records = ws.get_all_records()
+        
         if records:
-            df_settings = pd.DataFrame(records)
+            # En son eklenen satırı alıyoruz (-1)
+            last_record = records[-1]
+            raw_price = last_record.get('Birim_Fiyat', 0)
             
-            if 'Birim_Fiyat' in df_settings.columns:
-                 
-                 # 1. Sütunu string'e çevir
-                 price_series = df_settings['Birim_Fiyat'].astype(str)
-                 
-                 # 2. Türkçe/Avrupa formatını temizle: Noktaları kaldır, virgülleri noktaya çevir
-                 # Böylece "7.315,00" -> "7315,00" -> "7315.00" olur
-                 price_series = price_series.str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-                 
-                 # 3. Temizlenmiş veriyi sayıya çevir
-                 cleaned_price = pd.to_numeric(price_series, errors='coerce')
-                 
-                 # En son ve doğru veriyi döndür (Hata varsa 0.0)
-                 return cleaned_price.iloc[-1] if not cleaned_price.empty else 0.0
+            # --- KRİTİK DÜZELTME BURADA ---
+            
+            # DURUM 1: Veri zaten sayı olarak geldiyse (Float veya Int)
+            if isinstance(raw_price, (float, int)):
+                return float(raw_price)
+            
+            # DURUM 2: Veri yazı (string) olarak geldiyse (Örn: "73,15" veya "73.15")
+            if isinstance(raw_price, str):
+                # Önce boşlukları temizle
+                clean_str = raw_price.strip()
+                
+                # Eğer içinde virgül varsa, bu Türk formatıdır (73,15)
+                if ',' in clean_str:
+                    # Noktaları (binlik ayracı) sil, Virgülü noktaya çevir
+                    clean_str = clean_str.replace('.', '').replace(',', '.')
+                
+                # Eğer sadece nokta varsa ve sayısal görünüyorsa dokunma (73.15)
+                
+                return float(clean_str)
+                
         return 0.0
-    except: 
+    except Exception as e:
+        # Hata durumunda 0 dön, ama loga yazılabilir
         return 0.0
 
 # modules/finans.py içinde update_unit_price fonksiyonunu bununla değiştir:

@@ -4,6 +4,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 import re
 import difflib
+import streamlit as st
+import extra_streamlit_components as stx # YENİ KÜTÜPHANE
+import datetime
 
 # --- AYARLAR ---
 SHEET_NAME = "Mutfak_Takip"
@@ -19,39 +22,53 @@ SHEET_SETTINGS = "FINANS_AYARLAR"
 # --- GÜVENLİK ---
 # modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali
 
+# Cookie yöneticisini önbelleğe alıyoruz ki her defasında yeniden yüklemesin
+@st.cache_resource(experimental_allow_widgets=True)
+def get_manager():
+    return stx.CookieManager()
+
 def check_password():
     """
-    Şifre girişini yönetir. 
-    Yetki varsa True, yoksa formu gösterir ve False döner.
+    Şifre girişini yönetir (Çerez destekli).
     """
-    # 1. OTURUM KONTROLÜ
-    # Eğer session_state'te yetkili bayrağı True ise, direkt geç.
+    cookie_manager = get_manager()
+    
+    # Çerezlerin yüklenmesi için kısa bir bekleme (Streamlit senkronizasyonu için)
+    # cookies = cookie_manager.get_all() # Bazen gerekebilir ama aşağısı genelde yeterli
+    
+    # 1. ÇEREZ KONTROLÜ
+    # Eğer tarayıcıda 'auth_status' çerezi varsa ve değeri 'true' ise direkt içeri al
+    if cookie_manager.get(cookie="auth_status") == "true":
+        return True
+    
+    # 2. SESSION KONTROLÜ (Sayfa yenilenmeden gezinmeler için)
     if st.session_state.get("authenticated", False):
         return True
     
-    # 2. YETKİ YOKSA FORMU GÖSTER
-    # Formu sadece bir kez bu koşul altında gösterdiğimiz için duplicate hatası almayız.
+    # 3. YETKİ YOKSA FORMU GÖSTER
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
-        
         password = st.text_input("Şifrenizi Girin:", type="password")
+        # Beni Hatırla Kutucuğu
+        remember_me = st.checkbox("Beni 7 gün boyunca hatırla") 
         submitted = st.form_submit_button("Giriş Yap")
 
-    # 3. GİRİŞ KONTROLÜ
     if submitted:
-        # Gerçek şifrenizi secrets'tan almayı varsayıyoruz
         expected_password = st.secrets.get("APP_PASSWORD", "varsayilan_sifre")
         
         if password == expected_password: 
             st.session_state["authenticated"] = True
-            st.rerun() # Başarılı girişten sonra sayfayı yeniden başlat.
-            # Rerun yaptığı için bu fonksiyondan bir daha geçecek ve 1. adımdan True dönecek.
             
+            # Eğer "Beni Hatırla" seçildiyse Çerezi Kaydet (7 Günlük)
+            if remember_me:
+                expires = datetime.datetime.now() + datetime.timedelta(days=7)
+                cookie_manager.set("auth_status", "true", expires_at=expires)
+            
+            st.rerun()
+            return True
         else:
-            # Hata mesajını formun dışında gösteriyoruz
             st.error("Yanlış şifre. Tekrar deneyin.")
             
-    # Eğer yetki yoksa (form gösterildi ama başarıyla submit edilmediyse) False döner.
     return False
 
 # --- BAĞLANTILAR ---

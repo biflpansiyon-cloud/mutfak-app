@@ -153,12 +153,12 @@ def generate_monthly_accrual(selected_month, days_eaten, unit_price):
 
 # modules/finans.py içine (Diğer fonksiyonların yanına ekle)
 
-# modules/finans.py içinde distribute_yatili_installments fonksiyonunu DEĞİŞTİR:
+# modules/finans.py içinde distribute_yatili_installments fonksiyonunu GÜNCELLE:
 
 def distribute_yatili_installments(total_fee, year):
     """
     Tüm paralı yatılı öğrencilerin yıllık ücretini ve 4 taksit tutarını günceller.
-    Eksik sütun varsa otomatik ekler.
+    TC NO KULLANILMAZ. Sadece Ad_Soyad ve Sinif baz alınır.
     """
     try:
         client = get_gspread_client()
@@ -168,7 +168,7 @@ def distribute_yatili_installments(total_fee, year):
         # Mevcut verileri al
         all_data = ws.get_all_records()
         
-        # HEDEF SÜTUNLAR
+        # HEDEF SÜTUNLAR (Para ile ilgili olanlar)
         target_columns = [
             'Toplam_Yillik_Ucret', 
             'Taksit1_Tutar', 
@@ -177,45 +177,53 @@ def distribute_yatili_installments(total_fee, year):
             'Taksit4_Tutar'
         ]
         
-        # DURUM 1: HİÇ ÖĞRENCİ YOKSA
+        # DURUM 1: SAYFA BOŞSA VEYA HİÇ VERİ YOKSA
         if not all_data:
-            # En azından başlıkları (Header) kontrol et ve eksikse ekle
-            current_headers = ws.row_values(1) # 1. satırı oku
+            # Başlıkları kontrol et
+            current_headers = ws.row_values(1)
             if not current_headers:
-                # Sayfa bomboşsa temel başlıkları biz ekleyelim
-                ws.append_row(["TC_No", "Ad_Soyad", "Sinif"] + target_columns)
-                return False, "Sayfa boştu, başlıklar eklendi. Lütfen önce öğrenci ekleyin, sonra tekrar deneyin."
+                # Sayfa bomboşsa, TC'siz yeni başlıkları ekle
+                # Ad_Soyad zorunlu, Sinif opsiyonel ama dursun, iyidir.
+                ws.append_row(["Ad_Soyad", "Sinif"] + target_columns)
+                return False, "Sayfa boştu, 'Ad_Soyad' ve Taksit başlıkları eklendi. Lütfen öğrenci isimlerini girip tekrar deneyin."
             
-            # Başlıklar var ama veri yok
-            return False, "Listede hiç öğrenci yok. Taksit dağıtımı için önce öğrenci eklemelisiniz."
+            return False, "Listede hiç öğrenci yok. Lütfen 'Ad_Soyad' sütununa öğrencileri ekleyin."
 
         # DURUM 2: ÖĞRENCİ VAR, İŞLEM YAPALIM
         df = pd.DataFrame(all_data)
+        
+        # Eğer yanlışlıkla eski TC sütunu kaldıysa ve pandas onu okuduysa, işlemden düşürebiliriz
+        if 'TC_No' in df.columns:
+            df = df.drop(columns=['TC_No'])
+
+        # Ad_Soyad sütunu var mı kontrolü (Hayati önem taşır)
+        if 'Ad_Soyad' not in df.columns:
+             return False, "Hata: Sayfada 'Ad_Soyad' sütunu bulunamadı."
+
         installment_amount = total_fee / 4.0
         
-        # Eksik sütunları DataFrame'e ekle (Varsa üzerine yazar, yoksa oluşturur)
+        # Hesaplama ve Sütun Doldurma
         df['Toplam_Yillik_Ucret'] = total_fee
-        for col in target_columns[1:]: # Taksit sütunları
+        for col in target_columns[1:]: # Taksitler
             df[col] = installment_amount
 
-        # Veriyi Sheet formatına hazırla
-        # NaN (boş) değerleri temizle
+        # --- TEMİZLİK VE KAYDETME ---
         df = df.fillna("")
         
-        # Güncel veriyi listeye çevir (Başlıklar + Veri)
+        # Veriyi listeye çevir (Başlıklar + Veri)
         updated_data = [df.columns.tolist()] + df.values.tolist()
         
-        # Sheet'i temizle ve GÜVENLİ YÖNTEMLE yeniden yaz
+        # Sheet'i temizle ve yeniden yaz
         ws.clear()
         ws.update(values=updated_data, range_name="A1")
         
         # Ayarlar sayfasına da referans olarak kaydı güncelle
         update_annual_taksit(total_fee, year)
         
-        return True, f"{len(df)} öğrencinin taksit planı başarıyla güncellendi."
+        return True, f"{len(df)} öğrencinin (TC'siz) taksit planı güncellendi."
         
     except Exception as e:
-        return False, f"Kritik Hata: {e}"
+        return False, f"Hata: {e}"
         
 # =========================================================================
 # 2. DRIVE VE GEMINI FONKSİYONLARI (Aynı Kalıyor)

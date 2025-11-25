@@ -2,26 +2,32 @@ import streamlit as st
 import sys
 import os
 
-# --- NAVIGASYON AYARI (KRİTİK HAMLE) ---
-# Bu kod, uygulamanın çalıştığı klasörü Python'un "gözlüklerine" ekler.
-# Böylece 'modules' klasörünü net bir şekilde görür.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+# --- AJAN KODU (DEBUGGER) ---
+# Bu kısım, sunucunun hangi klasörde olduğunu ve yanında neleri gördüğünü ekrana basacak.
+st.write("📂 **Mevcut Çalışma Yolu:**", os.getcwd())
+st.write("📂 **Bu Klasördeki Dosyalar:**", os.listdir())
 
-# --- İMPORTLAR ŞİMDİ GÜVENLİ ---
+# Yolu zorla ekle
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
+# Modülleri şimdi çağır
 try:
+    import modules
+    st.success("✅ 'modules' klasörü bulundu!")
     from modules.utils import check_password
     from modules import irsaliye, fatura, menu, finans
 except ImportError as e:
-    # Eğer hala bulamazsa hatayı ekrana basalım ki sebebini görelim
-    st.error(f"Modül Hatası: {e}")
+    st.error(f"🚨 MODÜL HATASI DEVAM EDİYOR: {e}")
     st.stop()
 
-# Sayfa Ayarı
-st.set_page_config(page_title="Mutfak ERP Modüler", page_icon="💎", layout="wide")
+# --- AYARLAR ---
+st.set_page_config(page_title="Mutfak ERP", layout="wide")
 
-# ... (Kodun geri kalanı aynı devam etsin) ...
+if not check_password():
+    st.stop()
+
+# ... (Kodun geri kalanı aynı) ...
 
 # 1. Güvenlik
 if not check_password():

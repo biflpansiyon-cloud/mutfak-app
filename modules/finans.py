@@ -370,7 +370,7 @@ def render_page(selected_model):
                         st.error("Bu TAKSİT ödemesidir. Şu an sadece YEMEK ödemeleri otomatik kaydedilmektedir.")
 
 
-    # --- TAB 4: AYARLAR VE TAHAKKUK (YENİLENMİŞ) ---
+  # --- TAB 4: AYARLAR VE TAHAKKUK (GÜNCELLENMİŞ VERSİYON) ---
     with tab4:
         st.subheader("⚙️ Finans Ayarları ve Aylık Giriş")
         
@@ -383,60 +383,79 @@ def render_page(selected_model):
         st.info(f"Mevcut Güncel Birim Fiyat: **{current_price:,.2f} ₺**")
         
         with st.form("unit_price_form"):
-            new_price = st.number_input("Yeni Günlük Birim Fiyat (₺):", min_value=0.0, value=current_price + 0.50, step=0.01)
-            current_year = st.number_input("Geçerlilik Yılı:", min_value=2024, value=datetime.date.today().year + 1, step=1, key="price_year")
+            new_price = st.number_input("Yeni Günlük Birim Fiyat (₺):", min_value=0.0, value=current_price, step=0.01, format="%.2f")
+            current_year = st.number_input("Geçerlilik Yılı:", min_value=2024, value=datetime.date.today().year + 1, step=1)
             price_submit = st.form_submit_button("Birim Fiyatı Güncelle ve Kaydet")
             
             if price_submit:
                 if update_unit_price(new_price, current_year):
-                    st.success(f"Birim fiyat başarıyla {new_price:,.2f} ₺ olarak güncellendi. Yıl: {current_year}")
+                    st.success(f"Birim fiyat başarıyla {new_price} ₺ olarak güncellendi.")
                     st.rerun()
                 else:
-                    st.error("Güncelleme sırasında bir hata oluştu.")
+                    st.error("Güncelleme hatası.")
         
         st.divider()
         
         # ----------------------------------------
-        # BÖLÜM 2: GÜNDÜZLÜ ÖĞRENCİ AYLIK GÜN GİRİŞİ (TOPLU TAHAHHUK)
+        # BÖLÜM 2: GÜNDÜZLÜ ÖĞRENCİ AYLIK GÜN GİRİŞİ (CANLI HESAPLAMA)
         # ----------------------------------------
         st.markdown("#### 🗓️ Tüm Gündüzlü Öğrenciler İçin Aylık Tahakkuk Girişi")
         
         unique_student_count = get_data(SHEET_GUNDUZLU)[['Ad_Soyad', 'TC_No']].drop_duplicates().shape[0]
 
         if unique_student_count > 0 and current_price > 0:
-            st.info(f"Listedeki **{unique_student_count}** benzersiz öğrenciye tahakkuk yapılacaktır. Birim Fiyat: **{current_price:,.2f} ₺**")
+            st.info(f"Listedeki **{unique_student_count}** benzersiz öğrenciye tahakkuk yapılacaktır.")
 
-            with st.form("monthly_accrual_form"): 
-                
-                col_s1, col_s2 = st.columns(2)
-                
-                # Ay Seçimi (Son 3 ay ve Gelecek 3 ay)
-                today = datetime.date.today()
-                aylar_listesi = [
-                    (today.replace(day=1) + datetime.timedelta(days=30*i)).strftime("%Y-%B") for i in range(-3, 4)
-                ]
-                selected_month = col_s1.selectbox("Tahakkuk Ayı Seçiniz:", sorted(list(set(aylar_listesi)), reverse=True))
-                
-                # Gün Sayısı Girişi
-                days_eaten = col_s2.number_input(f"{selected_month} ayında tahakkuk edilecek Gün Sayısı:", 
+            # --- DÜZELTME 1: TÜRKÇE AY İSİMLERİ ---
+            tr_aylar = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", 
+                        "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+            
+            today = datetime.date.today()
+            # Son 3 ay ve Gelecek 3 ayın listesini Türkçe oluştur
+            ay_secenekleri = []
+            for i in range(-3, 4):
+                target_date = today + datetime.timedelta(days=30*i) # Yaklaşık tarih
+                yil = target_date.year
+                ay_index = target_date.month
+                ay_str = f"{yil}-{tr_aylar[ay_index]}"
+                ay_secenekleri.append(ay_str)
+            
+            # Listeyi tersten sırala (En yakın tarih üstte olsun) ve benzersiz yap
+            ay_secenekleri = sorted(list(set(ay_secenekleri)), reverse=True)
+
+            # --- DÜZELTME 2: FORM DIŞINA ALINAN GİRİŞLER (CANLI GÜNCELLEME İÇİN) ---
+            col_s1, col_s2 = st.columns(2)
+            
+            # Ay Seçimi
+            selected_month = col_s1.selectbox("Tahakkuk Ayı Seçiniz:", ay_secenekleri)
+            
+            # Gün Sayısı (Değişince anında hesaplasın diye form dışında)
+            days_eaten = col_s2.number_input(f"Seçilen Ayda Tahakkuk Edilecek Gün Sayısı:", 
                                              min_value=0, max_value=31, value=20)
-                
-                # Tahakkuk Hesaplama
-                tahakkuk_tutar = days_eaten * current_price
-                st.warning(f"Her Öğrenci İçin Tahakkuk Edilen Tutar: **{tahakkuk_tutar:,.2f} ₺**")
-                
-                tahakkuk_submit = st.form_submit_button(f"🗓️ {unique_student_count} Öğrenciye Tahakkuku KAYDET")
-                
-                if tahakkuk_submit:
-                    if tahakkuk_tutar > 0:
+            
+            # ANLIK HESAPLAMA VE GÖSTERİM
+            hesaplanan_tutar = days_eaten * current_price
+            
+            st.success(f"""
+            📊 **HESAPLAMA ÖZETİ:**
+            * Günlük Ücret: **{current_price:,.2f} ₺**
+            * Gün Sayısı: **{days_eaten}**
+            * **Öğrenci Başı Tutar: {hesaplanan_tutar:,.2f} ₺**
+            * **Toplam Ciro ({unique_student_count} Öğrenci): {hesaplanan_tutar * unique_student_count:,.2f} ₺**
+            """)
+            
+            # KAYDETME BUTONU
+            if st.button(f"✅ {selected_month} Ayı İçin Tahakkukları ONAYLA ve KAYDET"):
+                if hesaplanan_tutar > 0:
+                    with st.spinner("Tahakkuklar işleniyor..."):
                         count = generate_monthly_accrual(selected_month, days_eaten, current_price)
                         if count > 0:
-                            st.success(f"✅ Tahakkuk başarıyla oluşturuldu. {count} adet yeni kayıt Sheet'e eklendi. Gündüzlü sekmesini kontrol ediniz.")
+                            st.success(f"✅ {count} adet kayıt başarıyla oluşturuldu!")
                             st.rerun()
                         else:
-                            st.error("Tahakkuk kaydı sırasında hata oluştu veya öğrenci bulunamadı.")
-                    else:
-                        st.error("Tahakkuk tutarı 0'dan büyük olmalıdır.")
+                            st.error("Kayıt sırasında hata oluştu.")
+                else:
+                    st.error("Tutar 0 olamaz.")
 
         else:
             if current_price == 0: st.error("Lütfen önce Birim Fiyatı güncelleyin.")
@@ -451,18 +470,15 @@ def render_page(selected_model):
         
         with st.form("taksit_form"):
             st.write("Yıllık Toplam Taksit Ücretini girin (4 eşit taksite bölünür):")
-            
             yillik_taksit_toplam = st.number_input("Toplam Yıllık Ücret (₺):", min_value=0.0, value=20000.0, step=100.0)
-            
             taksit_tutari = yillik_taksit_toplam / 4
             st.info(f"Her Bir Taksit Tutarı: **{yillik_taksit_toplam:,.2f} ₺** / 4 = **{taksit_tutari:,.2f} ₺**")
-            
-            taksit_yil = st.number_input("Geçerlilik Yılı:", min_value=2024, value=datetime.date.today().year + 1, step=1, key="taksit_yil")
+            taksit_yil = st.number_input("Geçerlilik Yılı:", min_value=2024, value=datetime.date.today().year + 1, step=1)
             
             taksit_submit = st.form_submit_button("Taksit Ayarlarını Kaydet")
             
             if taksit_submit:
                 if update_annual_taksit(yillik_taksit_toplam, taksit_yil):
-                    st.success(f"Yıllık taksit toplamı {yillik_taksit_toplam:,.2f} ₺ olarak Ayarlar sayfasına kaydedildi. Yıl: {taksit_yil}")
+                    st.success(f"Yıllık taksit toplamı {yillik_taksit_toplam:,.2f} ₺ olarak kaydedildi.")
                 else:
-                    st.error("Taksit tutarı güncelleme sırasında hata oluştu.")
+                    st.error("Hata oluştu.")

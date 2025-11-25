@@ -153,77 +153,83 @@ def generate_monthly_accrual(selected_month, days_eaten, unit_price):
 
 # modules/finans.py içine (Diğer fonksiyonların yanına ekle)
 
-# modules/finans.py içinde distribute_yatili_installments fonksiyonunu GÜNCELLE:
+# modules/finans.py içinde distribute_yatili_installments fonksiyonunu TAMAMEN DEĞİŞTİR:
 
 def distribute_yatili_installments(total_fee, year):
     """
-    Tüm paralı yatılı öğrencilerin yıllık ücretini ve 4 taksit tutarını günceller.
-    TC NO KULLANILMAZ. Sadece Ad_Soyad ve Sinif baz alınır.
+    Tüm paralı yatılı öğrencilerin yıllık ücretini ve 4 taksit tutarını SIFIRDAN İNŞA EDER.
+    Sadece A Sütunundaki (İsimler) veriyi korur, gerisini standartlaştırır.
     """
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
-        ws = sh.worksheet(SHEET_YATILI)
+        # Sayfa ismini değişken yerine elle yazıyoruz ki hata olmasın
+        ws = sh.worksheet("OGRENCI_YATILI") 
         
-        # Mevcut verileri al
-        all_data = ws.get_all_records()
+        # 1. Tüm ham veriyi al (Başlıklar dahil ne varsa)
+        all_values = ws.get_all_values()
         
-        # HEDEF SÜTUNLAR (Para ile ilgili olanlar)
-        target_columns = [
-            'Toplam_Yillik_Ucret', 
-            'Taksit1_Tutar', 
-            'Taksit2_Tutar', 
-            'Taksit3_Tutar', 
-            'Taksit4_Tutar'
-        ]
+        # Eğer sayfa tamamen boşsa
+        if not all_values:
+            # Başlıkları atıp çıkalım
+            headers = ["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]
+            ws.append_row(headers)
+            return False, "Sayfa boştu, başlıklar eklendi. Lütfen A sütununa (Ad_Soyad) isimleri girip tekrar deneyin."
+
+        # 2. Mevcut İsimleri Kurtar (Sadece 1. Sütunu alıyoruz)
+        # İlk satırın başlık olma ihtimaline karşı:
+        # Eğer ilk satırda "Ad" veya "İsim" gibi bir şey yazıyorsa onu atlayacağız.
         
-        # DURUM 1: SAYFA BOŞSA VEYA HİÇ VERİ YOKSA
-        if not all_data:
-            # Başlıkları kontrol et
-            current_headers = ws.row_values(1)
-            if not current_headers:
-                # Sayfa bomboşsa, TC'siz yeni başlıkları ekle
-                # Ad_Soyad zorunlu, Sinif opsiyonel ama dursun, iyidir.
-                ws.append_row(["Ad_Soyad", "Sinif"] + target_columns)
-                return False, "Sayfa boştu, 'Ad_Soyad' ve Taksit başlıkları eklendi. Lütfen öğrenci isimlerini girip tekrar deneyin."
+        student_names = []
+        existing_classes = [] # Sınıfları da kurtarmaya çalışalım (2. sütundaysa)
+        
+        start_index = 0
+        # Eğer ilk satır başlıksa (içinde 'Ad' veya 'Name' geçiyorsa) atla
+        first_cell = all_values[0][0].lower() if all_values[0] else ""
+        if "ad" in first_cell or "isim" in first_cell or "name" in first_cell or "tc" in first_cell:
+            start_index = 1
             
-            return False, "Listede hiç öğrenci yok. Lütfen 'Ad_Soyad' sütununa öğrencileri ekleyin."
-
-        # DURUM 2: ÖĞRENCİ VAR, İŞLEM YAPALIM
-        df = pd.DataFrame(all_data)
+        for row in all_values[start_index:]:
+            if row and row[0].strip(): # Adı boş olmayanları al
+                student_names.append(row[0].strip())
+                # Eğer 2. sütun varsa ve doluysa sınıf olarak al, yoksa boş bırak
+                cls = row[1].strip() if len(row) > 1 else ""
+                existing_classes.append(cls)
         
-        # Eğer yanlışlıkla eski TC sütunu kaldıysa ve pandas onu okuduysa, işlemden düşürebiliriz
-        if 'TC_No' in df.columns:
-            df = df.drop(columns=['TC_No'])
+        if not student_names:
+             return False, "Listede hiç öğrenci ismi bulunamadı (A sütunu boş)."
 
-        # Ad_Soyad sütunu var mı kontrolü (Hayati önem taşır)
-        if 'Ad_Soyad' not in df.columns:
-             return False, "Hata: Sayfada 'Ad_Soyad' sütunu bulunamadı."
-
+        # 3. Yeni Veri Setini Hazırla
         installment_amount = total_fee / 4.0
         
-        # Hesaplama ve Sütun Doldurma
-        df['Toplam_Yillik_Ucret'] = total_fee
-        for col in target_columns[1:]: # Taksitler
-            df[col] = installment_amount
-
-        # --- TEMİZLİK VE KAYDETME ---
-        df = df.fillna("")
+        # Yeni Başlıklar
+        new_data = [["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]]
         
-        # Veriyi listeye çevir (Başlıklar + Veri)
-        updated_data = [df.columns.tolist()] + df.values.tolist()
-        
-        # Sheet'i temizle ve yeniden yaz
+        # Her öğrenci için satırı oluştur
+        for i, name in enumerate(student_names):
+            sinif = existing_classes[i] if i < len(existing_classes) else ""
+            row = [
+                name,
+                sinif,
+                total_fee,
+                installment_amount,
+                installment_amount,
+                installment_amount,
+                installment_amount
+            ]
+            new_data.append(row)
+            
+        # 4. Sayfayı Temizle ve Yeni Veriyi Bas
         ws.clear()
-        ws.update(values=updated_data, range_name="A1")
+        ws.update(values=new_data, range_name="A1")
         
         # Ayarlar sayfasına da referans olarak kaydı güncelle
         update_annual_taksit(total_fee, year)
         
-        return True, f"{len(df)} öğrencinin (TC'siz) taksit planı güncellendi."
+        return True, f"{len(student_names)} öğrencinin tablosu sıfırdan düzenlendi ve borçlandırıldı."
         
     except Exception as e:
-        return False, f"Hata: {e}"
+        return False, f"Hata oluştu: {e}"
         
 # =========================================================================
 # 2. DRIVE VE GEMINI FONKSİYONLARI (Aynı Kalıyor)

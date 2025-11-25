@@ -151,7 +151,74 @@ def generate_monthly_accrual(selected_month, days_eaten, unit_price):
         st.error(f"Tahakkuk kaydetme hatası: {e}")
         return -1
 
+# modules/finans.py içine (Diğer fonksiyonların yanına ekle)
 
+def distribute_yatili_installments(total_fee, year):
+    """
+    Tüm paralı yatılı öğrencilerin yıllık ücretini ve 4 taksit tutarını günceller.
+    """
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_YATILI)
+        
+        # Tüm veriyi çek
+        all_data = ws.get_all_records()
+        if not all_data:
+            return False, "Yatılı öğrenci listesi boş."
+
+        # DataFrame oluştur
+        df = pd.DataFrame(all_data)
+        
+        # Taksit hesabı
+        installment_amount = total_fee / 4.0
+        
+        # GÜNCELLENECEK SÜTUNLAR
+        # Bu sütun isimlerinin Sheet'te birebir olduğundan emin olmalısın
+        updates = []
+        
+        # Sheet'teki başlık satırını (row 1) hariç tutarak satırları dolaşacağız
+        # gspread'de satır numaraları 1'den başlar, başlık 1. satırdır. Veriler 2'den başlar.
+        
+        # Performans için 'batch_update' kullanmak en iyisidir ama karmaşık olabilir.
+        # Şimdilik hücre hücre güncellemek yerine, tüm tabloyu güncellemek daha güvenli.
+        
+        # DataFrame üzerinde güncelleme yap
+        if 'Toplam_Yillik_Ucret' in df.columns:
+            df['Toplam_Yillik_Ucret'] = total_fee
+            
+        taksit_sutunlari = ['Taksit1_Tutar', 'Taksit2_Tutar', 'Taksit3_Tutar', 'Taksit4_Tutar']
+        
+        for col in taksit_sutunlari:
+            if col in df.columns:
+                df[col] = installment_amount
+            else:
+                return False, f"Sheet'te '{col}' sütunu bulunamadı."
+        
+        # DataFrame'i listeye çevirip Sheet'e geri yükle (TOPLU GÜNCELLEME)
+        # update fonksiyonu tüm sayfayı silip yeniden yazmaz, hücre aralığını günceller.
+        # Ancak en güvenlisi: Veriyi listeye çevirip update etmek.
+        
+        # Başlıkları al
+        headers = df.columns.tolist()
+        # Verileri al
+        values = df.values.tolist()
+        
+        # Listeyi birleştir (Başlık + Veri)
+        final_data = [headers] + values
+        
+        # Sheet'i temizle ve yeniden yaz (En temiz yöntem budur)
+        ws.clear()
+        ws.update(final_data)
+        
+        # Ayarlar sayfasına da referans olarak kaydedelim
+        update_annual_taksit(total_fee, year)
+        
+        return True, f"{len(values)} öğrencinin taksit planı güncellendi."
+        
+    except Exception as e:
+        return False, f"Hata: {e}"
+        
 # =========================================================================
 # 2. DRIVE VE GEMINI FONKSİYONLARI (Aynı Kalıyor)
 # =========================================================================

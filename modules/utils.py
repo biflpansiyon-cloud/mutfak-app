@@ -23,7 +23,7 @@ SHEET_SETTINGS = "FINANS_AYARLAR"
 # modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali
 
 # Cookie yöneticisini önbelleğe alıyoruz ki her defasında yeniden yüklemesin
-@st.cache_resource(experimental_allow_widgets=True)
+@st.cache_resource
 def get_manager():
     return stx.CookieManager()
 

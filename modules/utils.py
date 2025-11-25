@@ -14,39 +14,42 @@ SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
 
 # --- GÜVENLİK ---
-# modules/utils.py içindeki check_password fonksiyonunun güncel yapısı
+# modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali
 
 def check_password():
-    """Şifre girişi için formu oluşturur ve Enter tuşunu etkinleştirir."""
+    """
+    Şifre girişini yönetir. 
+    Yetki varsa True, yoksa formu gösterir ve False döner.
+    """
+    # 1. OTURUM KONTROLÜ
+    # Eğer session_state'te yetkili bayrağı True ise, direkt geç.
+    if st.session_state.get("authenticated", False):
+        return True
     
-    # Giriş formu için bir konteyner oluşturuyoruz
+    # 2. YETKİ YOKSA FORMU GÖSTER
+    # Formu sadece bir kez bu koşul altında gösterdiğimiz için duplicate hatası almayız.
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
         
-        # 1. Şifre Girişi
         password = st.text_input("Şifrenizi Girin:", type="password")
-        
-        # 2. Buton (artık formun parçası)
         submitted = st.form_submit_button("Giriş Yap")
 
-    # Form gönderildiyse (kullanıcı Enter'a bastıysa veya butona tıkladıysa)
+    # 3. GİRİŞ KONTROLÜ
     if submitted:
-        # Gerçek şifre kontrol mekanizmanız burada olmalı
-        if password == st.secrets["APP_PASSWORD"]: 
+        # Gerçek şifrenizi secrets'tan almayı varsayıyoruz
+        expected_password = st.secrets.get("APP_PASSWORD", "varsayilan_sifre")
+        
+        if password == expected_password: 
             st.session_state["authenticated"] = True
-            st.rerun() # Başarılı girişten sonra sayfayı yenile
-            return True
+            st.rerun() # Başarılı girişten sonra sayfayı yeniden başlat.
+            # Rerun yaptığı için bu fonksiyondan bir daha geçecek ve 1. adımdan True dönecek.
+            
         else:
+            # Hata mesajını formun dışında gösteriyoruz
             st.error("Yanlış şifre. Tekrar deneyin.")
             
-    # Eğer oturum zaten açıksa (rerun sonrası)
-    if st.session_state.get("authenticated", False):
-        return True
-        
-    # Oturum kapalıysa ve form yeni gönderilmediyse
+    # Eğer yetki yoksa (form gösterildi ama başarıyla submit edilmediyse) False döner.
     return False
-
-# NOT: app.py dosyasında st.stop() kullanmaya devam edebilirsiniz.
 
 # --- BAĞLANTILAR ---
 def get_gspread_client():

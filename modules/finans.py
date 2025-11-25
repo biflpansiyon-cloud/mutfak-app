@@ -56,14 +56,21 @@ def get_current_unit_price():
     except: 
         return 0.0
 
+# modules/finans.py içinde update_unit_price fonksiyonunu bununla değiştir:
+
 def update_unit_price(new_price, year):
-    """Yeni birim fiyatı Sheets'e kaydeder (FINANS_AYARLAR)."""
+    """Yeni birim fiyatı Sheets'e kaydeder (Türkçe format zorlaması ile)."""
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_SETTINGS)
-        # Sadece Birim Fiyatı güncelliyoruz, diğer sütunlar boş kalabilir.
-        ws.append_row([year, new_price, ''], value_input_option='USER_ENTERED') 
+        
+        # FIX: Python float (73.15) -> Türkçe String ("73,15")
+        # Böylece Sheets bunu binlik sayı sanmaz, ondalık olarak kaydeder.
+        price_tr_format = f"{new_price:.2f}".replace('.', ',')
+        
+        # String olarak gönderiyoruz, Sheets bunu sayıya kendi çevirir
+        ws.append_row([year, price_tr_format, ''], value_input_option='USER_ENTERED') 
         return True
     except Exception as e:
         st.error(f"Birim fiyat güncelleme hatası: {e}")

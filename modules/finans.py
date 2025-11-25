@@ -4,7 +4,48 @@ import google.generativeai as genai
 import io
 import json
 from modules.utils import get_gspread_client, get_drive_service, find_folder_id, SHEET_YATILI, SHEET_GUNDUZLU
+# modules/finans.py içine, üstteki importların hemen altına ekle
 
+def move_file_in_drive(service, file_id, source_folder_id, destination_folder_id):
+    """Bir dosyayı Drive içinde bir klasörden diğerine taşır."""
+    try:
+        file = service.files().update(
+            fileId=file_id,
+            addParents=destination_folder_id, # Yeni klasöre ekle
+            removeParents=source_folder_id,   # Eski klasörden çıkar
+            fields='id, parents'
+        ).execute()
+        return True
+    except Exception as e:
+        st.error(f"Dosya taşıma hatası: {e}")
+        return False
+
+def write_to_gunduzlu_sheet(analiz_sonucu, dekont_link):
+    """Gündüzlü öğrencilerin yemek ödeme dekontunu Sheets'e kaydeder."""
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_GUNDUZLU)
+        
+        # Sütun sırasına göre veri satırını oluştur
+        new_row = [
+            analiz_sonucu.get('ogrenci_tc', ''),
+            analiz_sonucu.get('ogrenci_ad', 'Bilinmiyor'),
+            '', # Sinif (Bu veriyi henüz Geminiden istemedik, şimdilik boş)
+            '2025-Ekim', # Ay (analiz_sonucu['tarih']'ten ay çekimi karmaşık, şimdilik sabit)
+            '', # Yenen_Yemek_Sayisi (Bu ödeme, tahakkuk değil)
+            '', # Birim_Fiyat
+            analiz_sonucu.get('tutar', 0),
+            'Ödendi', # Odenen_Durum
+            dekont_link
+        ]
+        
+        ws.append_row(new_row, value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"Sheets'e yazma hatası (Gündüzlü): {e}")
+        return False
+        
 # --- GEMINI AYARLARI ---
 # API Key'i secrets dosyasından alıyoruz
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])

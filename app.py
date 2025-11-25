@@ -1,10 +1,22 @@
 import streamlit as st
-# modules paketinden utils ve diğerlerini çağırıyoruz
+import sys
+import os
+
+# --- NAVIGASYON AYARI (PUSULA) ---
+# Bu kod, app.py'nin olduğu klasörü sistem yoluna ekler.
+# Böylece 'modules' klasörünü eliyle koymuş gibi bulur.
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
+# --- MODÜLLERİ ŞİMDİ ÇAĞIR ---
 from modules.utils import check_password
+# Eğer bu satırda hala hata alırsan klasör yapın yanlıştır.
 from modules import irsaliye, fatura, menu, finans
 
 # Sayfa Ayarı
-st.set_page_config(page_title="Mutfak ERP Modular", page_icon="💎", layout="wide")
+st.set_page_config(page_title="Mutfak ERP Modüler", page_icon="💎", layout="wide")
+
+# ... (Kodun geri kalanı aynı devam eder) ...
 
 # 1. Güvenlik
 if not check_password():

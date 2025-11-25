@@ -26,8 +26,10 @@ def get_data(sheet_name):
         # st.error(f"Veri çekme hatası ({sheet_name}): {e}") # Hata mesajını gizleyelim
         return pd.DataFrame()
 
+# modules/finans.py içinde, get_current_unit_price fonksiyonu GÜNCELLENDİ
+
 def get_current_unit_price():
-    """FINANS_AYARLAR sayfasından güncel birim fiyatı çeker."""
+    """FINANS_AYARLAR sayfasından güncel birim fiyatı çekerken, Türkçe formatı temizler."""
     try:
         client = get_gspread_client()
         sh = client.open("Mutfak_Takip")
@@ -35,10 +37,21 @@ def get_current_unit_price():
         records = ws.get_all_records()
         if records:
             df_settings = pd.DataFrame(records)
-            # En son girilen 'Birim_Fiyat' sütununu döndür
+            
             if 'Birim_Fiyat' in df_settings.columns:
-                 # En son kaydı al, float'a çevir, hata varsa 0 yap
-                 return pd.to_numeric(df_settings['Birim_Fiyat'], errors='coerce').iloc[-1]
+                 
+                 # 1. Sütunu string'e çevir
+                 price_series = df_settings['Birim_Fiyat'].astype(str)
+                 
+                 # 2. Türkçe/Avrupa formatını temizle: Noktaları kaldır, virgülleri noktaya çevir
+                 # Böylece "7.315,00" -> "7315,00" -> "7315.00" olur
+                 price_series = price_series.str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+                 
+                 # 3. Temizlenmiş veriyi sayıya çevir
+                 cleaned_price = pd.to_numeric(price_series, errors='coerce')
+                 
+                 # En son ve doğru veriyi döndür (Hata varsa 0.0)
+                 return cleaned_price.iloc[-1] if not cleaned_price.empty else 0.0
         return 0.0
     except: 
         return 0.0

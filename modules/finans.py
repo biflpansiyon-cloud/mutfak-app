@@ -5,6 +5,38 @@ import io
 import json
 from modules.utils import get_gspread_client, get_drive_service, find_folder_id, SHEET_YATILI, SHEET_GUNDUZLU
 # modules/finans.py içine, üstteki importların hemen altına ekle
+# modules/finans.py içine, üstteki fonksiyonların yanına ekle
+
+def get_current_unit_price():
+    """FINANS_AYARLAR sayfasından güncel birim fiyatı çeker."""
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_SETTINGS)
+        # Sadece son satırı veya tek bir fiyat hücresini çekmek daha iyidir.
+        records = ws.get_all_records()
+        if records:
+            # En son girilen satırı al ve fiyatı döndür
+            df_settings = pd.DataFrame(records)
+            return df_settings.iloc[-1]['Birim_Fiyat']
+        return 0.0
+    except Exception as e:
+        # st.error(f"Birim fiyat çekme hatası: {e}") # Hata mesajını gizleyelim
+        return 0.0
+
+def update_unit_price(new_price, year):
+    """Yeni birim fiyatı Sheets'e kaydeder."""
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_SETTINGS)
+        
+        # Sütun sırasına dikkat et: ['Yil', 'Birim_Fiyat']
+        ws.append_row([year, new_price], value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"Birim fiyat güncelleme hatası: {e}")
+        return False
 
 def move_file_in_drive(service, file_id, source_folder_id, destination_folder_id):
     """Bir dosyayı Drive içinde bir klasörden diğerine taşır."""
@@ -122,7 +154,10 @@ def render_page(selected_model):
     st.header("💰 Finans Yönetimi")
     st.caption(f"Aktif Zeka: {selected_model}")
 
-    tab1, tab2, tab3 = st.tabs(["🏫 Paralı Yatılı (Taksit)", "🍽️ Gündüzlü (Yemek)", "🤖 Dekont İşle (AI)"])
+    # Sekmeler GÜNCELLENDİ
+    tab1, tab2, tab3, tab4 = st.tabs(["🏫 Yatılı", "🍽️ Gündüzlü", "🤖 Dekont İşle", "⚙️ Ayarlar/Tahakkuk"])
+    
+    # ... (tab1, tab2, tab3 kodları aynı kalır) ...
 
     # --- TAB 1 & 2 (GÖRÜNTÜLEME) ---
     # modules/finans.py içinde, tab1 bloğunda GÜNCELLEME:
@@ -254,3 +289,92 @@ def render_page(selected_model):
                                 st.error("1/2: Sheets'e kaydetme başarısız oldu.")
                         else:
                             st.error("Bu TAKSİT ödemesidir. Şu an sadece YEMEK ödemeleri otomatik kaydedilmektedir.")
+                # --- TAB 4: AYARLAR VE TAHAKKUK (YENİ) ---
+    with tab4:
+        st.subheader("⚙️ Finans Ayarları ve Aylık Giriş")
+        
+        # ----------------------------------------
+        # BÖLÜM 1: BİRİM FİYAT GÜNCELLEME (Yıllık)
+        # ----------------------------------------
+        st.markdown("#### 💸 Yemek Birim Fiyatı Ayarları")
+        
+        current_price = get_current_unit_price()
+        st.info(f"Mevcut Güncel Birim Fiyat: **{current_price:,.2f} ₺**")
+        
+        with st.form("unit_price_form"):
+            new_price = st.number_input("Yeni Günlük Birim Fiyat (₺):", min_value=0.0, value=current_price + 0.50, step=0.01)
+            current_year = st.number_input("Geçerlilik Yılı:", min_value=2024, value=2026, step=1)
+            price_submit = st.form_submit_button("Birim Fiyatı Güncelle ve Kaydet")
+            
+            if price_submit:
+                if update_unit_price(new_price, current_year):
+                    st.success(f"Birim fiyat başarıyla {new_price:,.2f} ₺ olarak güncellendi. Yıl: {current_year}")
+                    st.rerun()
+                else:
+                    st.error("Güncelleme sırasında bir hata oluştu.")
+        
+        st.divider()
+        
+        # ----------------------------------------
+        # BÖLÜM 2: GÜNDÜZLÜ ÖĞRENCİ AYLIK GÜN GİRİŞİ
+        # ----------------------------------------
+        st.markdown("#### 🗓️ Aylık Gün Sayısı Girişi ve Tahakkuk")
+        
+        df_gunduzlu = get_data(SHEET_GUNDUZLU)
+        df_gunduzlu = df_gunduzlu[['Ad_Soyad', 'Sinif']].drop_duplicates()
+        
+        if not df_gunduzlu.empty:
+            with st.form("monthly_day_input_form"):
+                
+                # Öğrenci ve Ay Seçimi
+                st.write("**Tahakkuk yapılacak öğrenci ve dönemi seçin:**")
+                
+                col_s1, col_s2 = st.columns(2)
+                selected_name = col_s1.selectbox("Öğrenci Seç:", df_gunduzlu['Ad_Soyad'].unique())
+                
+                aylar = ["2025-Kasım", "2025-Aralık", "2026-Ocak"] # Dinamik hale getirilebilir
+                selected_month = col_s2.selectbox("Ay Seç:", aylar)
+                
+                st.write("---")
+                
+                # Gün Sayısı Girişi
+                days_eaten = st.number_input(f"{selected_name} için {selected_month} ayında Yenen Yemek Gün Sayısı:", 
+                                             min_value=0, max_value=31, value=20)
+                
+                # Tahakkuk Hesaplama
+                tahakkuk_tutar = days_eaten * current_price
+                st.info(f"Tahakkuk Edilen Tutar: **{days_eaten}** gün x **{current_price:,.2f} ₺** = **{tahakkuk_tutar:,.2f} ₺**")
+                
+                # NOT: Bu tahakkuk verisini kaydetme fonksiyonu yazılmalıdır (Şimdilik sadece UI)
+                tahakkuk_submit = st.form_submit_button("Aylık Tahakkuku Kaydet (Sheet'e yazılacak)")
+                
+                if tahakkuk_submit:
+                    st.warning("⚠️ Tahakkuk verisini Sheet'e kaydetme fonksiyonu (Yeni Satır) henüz yazılmadı.")
+        else:
+            st.warning("Öğrenci listesi bulunamadı.")
+
+# modules/finans.py içinde, with tab4: bloğunun en altına ekle
+
+        st.divider()
+        
+        # ----------------------------------------
+        # BÖLÜM 3: PARALI YATILI TAKSİT AYARLARI (Yıllık)
+        # ----------------------------------------
+        st.markdown("#### 🏫 Yatılı Öğrenci Taksit Ayarları")
+
+        # Not: Taksit tutarları genelde 4 eşit taksittir. Tek bir tutar girip 4'e böleceğiz.
+        
+        with st.form("taksit_form"):
+            st.write("Yıllık Toplam Taksit Ücretini girin (4 eşit taksite bölünür):")
+            
+            yillik_taksit_toplam = st.number_input("Toplam Yıllık Ücret (₺):", min_value=0.0, value=20000.0, step=100.0)
+            
+            taksit_tutari = yillik_taksit_toplam / 4
+            st.info(f"Her Bir Taksit Tutarı: **{yillik_taksit_toplam:,.2f} ₺** / 4 = **{taksit_tutari:,.2f} ₺**")
+            
+            taksit_yil = st.number_input("Geçerlilik Yılı:", min_value=2024, value=2026, step=1, key="taksit_yil")
+            
+            taksit_submit = st.form_submit_button("Taksit Ayarlarını Kaydet")
+            
+            if taksit_submit:
+                st.warning("⚠️ Taksit tutarını Sheets'e kaydetme (ve mevcut yatılı listesini güncelleme) fonksiyonu henüz yazılmadı.")

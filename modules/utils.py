@@ -14,20 +14,39 @@ SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
 
 # --- GÜVENLİK ---
-def check_password():
-    if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
-    
-    def password_entered():
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+# modules/utils.py içindeki check_password fonksiyonunun güncel yapısı
 
-    if not st.session_state["password_correct"]:
-        st.text_input("🔑 Erişim Şifresi:", type="password", on_change=password_entered, key="password")
-        return False
-    return True
+def check_password():
+    """Şifre girişi için formu oluşturur ve Enter tuşunu etkinleştirir."""
+    
+    # Giriş formu için bir konteyner oluşturuyoruz
+    with st.form("login_form"):
+        st.subheader("🔒 Sisteme Giriş")
+        
+        # 1. Şifre Girişi
+        password = st.text_input("Şifrenizi Girin:", type="password")
+        
+        # 2. Buton (artık formun parçası)
+        submitted = st.form_submit_button("Giriş Yap")
+
+    # Form gönderildiyse (kullanıcı Enter'a bastıysa veya butona tıkladıysa)
+    if submitted:
+        # Gerçek şifre kontrol mekanizmanız burada olmalı
+        if password == st.secrets["APP_PASSWORD"]: 
+            st.session_state["authenticated"] = True
+            st.rerun() # Başarılı girişten sonra sayfayı yenile
+            return True
+        else:
+            st.error("Yanlış şifre. Tekrar deneyin.")
+            
+    # Eğer oturum zaten açıksa (rerun sonrası)
+    if st.session_state.get("authenticated", False):
+        return True
+        
+    # Oturum kapalıysa ve form yeni gönderilmediyse
+    return False
+
+# NOT: app.py dosyasında st.stop() kullanmaya devam edebilirsiniz.
 
 # --- BAĞLANTILAR ---
 def get_gspread_client():

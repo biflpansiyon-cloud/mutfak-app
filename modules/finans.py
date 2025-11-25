@@ -1,12 +1,19 @@
 import streamlit as st
 import pandas as pd
-from modules.utils import get_gspread_client, SHEET_YATILI, SHEET_GUNDUZLU
+import google.generativeai as genai
+import io
+import json
+from modules.utils import get_gspread_client, get_drive_service, find_folder_id, SHEET_YATILI, SHEET_GUNDUZLU
+
+# --- GEMINI AYARLARI ---
+# API Key'i secrets dosyasından alıyoruz
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 def get_data(sheet_name):
-    """Google Sheets'ten veriyi çeker ve DataFrame'e çevirir."""
+    """Google Sheets'ten veriyi çeker (Hata önleyici mod)."""
     try:
         client = get_gspread_client()
-        sh = client.open("Mutfak_Takip") # Ana dosya adın
+        sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(sheet_name)
         data = ws.get_all_records()
         df = pd.DataFrame(data)
@@ -15,69 +22,131 @@ def get_data(sheet_name):
         st.error(f"Veri çekme hatası ({sheet_name}): {e}")
         return pd.DataFrame()
 
+def download_file_from_drive(service, file_id):
+    """Drive'dan dosya verisini (byte olarak) indirir."""
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_data = request.execute()
+        return file_data
+    except Exception as e:
+        st.error(f"Dosya indirme hatası: {e}")
+        return None
+
+def analyze_receipt_with_gemini(file_data, mime_type, model_name):
+    """Dosyayı Gemini'ye gönderir ve JSON çıktı ister."""
+    
+    # Model objesini oluştur
+    model = genai.GenerativeModel(model_name)
+    
+    prompt = """
+    Sen uzman bir muhasebe asistanısın. Bu bir banka dekontu (resim veya PDF).
+    Lütfen şu bilgileri analiz et ve SADECE saf bir JSON formatında ver (Markdown blokları olmadan):
+    
+    {
+        "tarih": "YYYY-AA-GG formatında işlem tarihi",
+        "gonderen_ad_soyad": "Parayı gönderen kişinin adı",
+        "tutar": "Sadece sayısal değer (örn: 1500.50)",
+        "aciklama": "Dekonttaki açıklama metni",
+        "ogrenci_tc": "Açıklamada varsa öğrenci TC'si, yoksa boş string",
+        "ogrenci_ad": "Açıklamada varsa öğrenci adı, yoksa boş string",
+        "tur_tahmini": "Açıklamaya bakarak bu 'YEMEK' mi yoksa 'TAKSİT' mi tahmin et"
+    }
+    
+    Eğer okuyamadığın bir alan varsa null veya boş bırak.
+    """
+    
+    try:
+        # Görüntü/PDF verisi için blob oluştur
+        doc_part = {
+            "mime_type": mime_type,
+            "data": file_data
+        }
+        
+        response = model.generate_content([prompt, doc_part])
+        
+        # Yanıtı temizle (Bazen ```json ... ``` içinde gelir)
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] # İlk satırı at
+            if text.endswith("```"):
+                text = text.rsplit("\n", 1)[0] # Son satırı at
+                
+        return json.loads(text)
+        
+    except Exception as e:
+        st.error(f"Gemini Analiz Hatası: {e}")
+        return None
+
 def render_page(selected_model):
     st.header("💰 Finans Yönetimi")
-    st.info(f"Aktif Model: {selected_model} (Şu an sadece listeleme modundayız)")
+    st.caption(f"Aktif Zeka: {selected_model}")
 
     tab1, tab2, tab3 = st.tabs(["🏫 Paralı Yatılı (Taksit)", "🍽️ Gündüzlü (Yemek)", "🤖 Dekont İşle (AI)"])
 
-    # --- TAB 1: PARALI YATILI ---
+    # --- TAB 1 & 2 (GÖRÜNTÜLEME) ---
     with tab1:
-        st.subheader("Taksit Takip Çizelgesi")
+        st.subheader("Taksit Durumu")
         df_yatili = get_data(SHEET_YATILI)
-        
         if not df_yatili.empty:
-            # --- VERİ TEMİZLİĞİ (GÜNCELLEME BURADA) ---
-            # Para içeren sütunları sayıya çevir, hata verirse (boşsa) 0 yap
-            para_sutunlari = ['Toplam_Yillik_Ucret', 'Odenen_Toplam', 'Kalan_Borc']
-            for col in para_sutunlari:
-                if col in df_yatili.columns:
-                    # Boş stringleri NaN yap, sonra sayıya çevir, en son 0 ile doldur
-                    df_yatili[col] = pd.to_numeric(df_yatili[col], errors='coerce').fillna(0)
-
-            # Özet Kartlar
-            col1, col2 = st.columns(2)
-            # Sütun yoksa 0 varsay
-            toplam_borc = df_yatili['Toplam_Yillik_Ucret'].sum() if 'Toplam_Yillik_Ucret' in df_yatili.columns else 0.0
-            toplam_odenen = df_yatili['Odenen_Toplam'].sum() if 'Odenen_Toplam' in df_yatili.columns else 0.0
-            
-            # Artık toplam_borc kesinlikle sayı olduğu için hata vermez
-            col1.metric("Toplam Beklenen Gelir", f"{toplam_borc:,.2f} ₺")
-            col2.metric("Tahsil Edilen", f"{toplam_odenen:,.2f} ₺", delta=f"{toplam_odenen - toplam_borc:,.2f} ₺")
-            
             st.dataframe(df_yatili, use_container_width=True)
-        else:
-            st.warning(f"'{SHEET_YATILI}' sayfasında veri bulunamadı veya sütun başlıkları hatalı.")
-
-    # --- TAB 2: GÜNDÜZLÜ YEMEK ---
+            
     with tab2:
-        st.subheader("Aylık Yemek Ücretleri")
+        st.subheader("Yemek Ödemeleri")
         df_gunduzlu = get_data(SHEET_GUNDUZLU)
-        
         if not df_gunduzlu.empty:
-             # --- VERİ TEMİZLİĞİ ---
-            if 'Toplam_Tutar' in df_gunduzlu.columns:
-                 df_gunduzlu['Toplam_Tutar'] = pd.to_numeric(df_gunduzlu['Toplam_Tutar'], errors='coerce').fillna(0)
+            st.dataframe(df_gunduzlu, use_container_width=True)
 
-            # Filtreleme
-            if 'Ay' in df_gunduzlu.columns:
-                aylar = df_gunduzlu['Ay'].unique()
-                if len(aylar) > 0:
-                    secilen_ay = st.selectbox("Dönem Seçiniz:", aylar)
-                    df_goster = df_gunduzlu[df_gunduzlu['Ay'] == secilen_ay]
-                else:
-                    df_goster = df_gunduzlu
-            else:
-                df_goster = df_gunduzlu
-                
-            st.dataframe(df_goster, use_container_width=True)
-        else:
-            st.warning(f"'{SHEET_GUNDUZLU}' sayfasında veri bulunamadı.")
-
-    # --- TAB 3: AI DEKONT İŞLEME ---
+    # --- TAB 3: SİHİRLİ BÖLÜM ---
     with tab3:
-        st.subheader("🤖 Gemini ile Dekont Analizi")
-        st.write("Drive'daki 'Finans/Gelen_Dekontlar' klasöründeki dosyalar burada taranacak.")
+        st.subheader("🤖 Otomatik Dekont Analizi")
         
-        if st.button("Drive'ı Tara ve Dekontları Analiz Et"):
-            st.warning("⚠️ Bu özellik bir sonraki adımda aktif edilecek. Önce Sheets yapısını doğrulayalım!")
+        service = get_drive_service()
+        if not service:
+            st.warning("Drive servisi başlatılamadı.")
+            return
+
+        # Klasörleri bul
+        root_id = find_folder_id(service, "Mutfak_ERP_Drive")
+        finans_id = find_folder_id(service, "Finans", parent_id=root_id)
+        target_id = find_folder_id(service, "Gelen_Dekontlar", parent_id=finans_id)
+        
+        if target_id:
+            # Dosyaları listele
+            results = service.files().list(
+                q=f"'{target_id}' in parents and trashed=false",
+                fields="files(id, name, mimeType)"
+            ).execute()
+            files = results.get('files', [])
+            
+            st.info(f"📂 İşlenmeyi bekleyen **{len(files)}** dekont bulundu.")
+            
+            if files:
+                # Seçim kutusu (Hepsini mi yapalım tek tek mi?)
+                selected_file_id = st.selectbox("Analiz edilecek dosyayı seçin:", 
+                                              options=[f['id'] for f in files],
+                                              format_func=lambda x: next((f['name'] for f in files if f['id'] == x), x))
+                
+                selected_file_meta = next((f for f in files if f['id'] == selected_file_id), None)
+                
+                if st.button("🚀 Bu Dekontu Analiz Et"):
+                    with st.spinner("Dosya indiriliyor ve Gemini'ye gönderiliyor..."):
+                        # 1. Dosyayı İndir
+                        file_data = download_file_from_drive(service, selected_file_id)
+                        
+                        if file_data:
+                            # 2. Gemini'ye Sor
+                            analiz_sonucu = analyze_receipt_with_gemini(
+                                file_data, 
+                                selected_file_meta['mimeType'], 
+                                selected_model
+                            )
+                            
+                            if analiz_sonucu:
+                                st.success("✅ Analiz Tamamlandı!")
+                                st.json(analiz_sonucu)
+                                
+                                st.info("ℹ️ Bu veriyi veritabanına kaydetme özelliği bir sonraki adımda eklenecek.")
+                            else:
+                                st.error("Analizden sonuç dönmedi.")
+        else:
+            st.error("Klasör yapısı bulunamadı (Adım 2'deki klasörleri kontrol et).")

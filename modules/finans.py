@@ -84,11 +84,38 @@ def render_page(selected_model):
     tab1, tab2, tab3 = st.tabs(["🏫 Paralı Yatılı (Taksit)", "🍽️ Gündüzlü (Yemek)", "🤖 Dekont İşle (AI)"])
 
     # --- TAB 1 & 2 (GÖRÜNTÜLEME) ---
+    # modules/finans.py içinde, tab1 bloğunda GÜNCELLEME:
+
+    # --- TAB 1: PARALI YATILI ---
     with tab1:
-        st.subheader("Taksit Durumu")
+        st.subheader("Taksit Takip Çizelgesi")
         df_yatili = get_data(SHEET_YATILI)
+        
         if not df_yatili.empty:
+            # --- VERİ TEMİZLİĞİ (GÜNCELLEME BURADA) ---
+            # Hata veren tüm para sütunlarını temizleme listesine alıyoruz
+            para_sutunlari = [
+                'Toplam_Yillik_Ucret', 'Odenen_Toplam', 'Kalan_Borc', 
+                'Taksit1_Tutar', 'Taksit2_Tutar', 'Taksit3_Tutar', 'Taksit4_Tutar'
+            ]
+            
+            for col in para_sutunlari:
+                if col in df_yatili.columns:
+                    # Zorla sayıya çevir (hata verirse NaN yap), NaN'ları 0 ile doldur
+                    df_yatili[col] = pd.to_numeric(df_yatili[col], errors='coerce').fillna(0).astype(float)
+            # --- VERİ TEMİZLİĞİ SONU ---
+            
+            # Özet Kartlar (toplam_borc artık kesinlikle float/int)
+            col1, col2 = st.columns(2)
+            toplam_borc = df_yatili['Toplam_Yillik_Ucret'].sum() if 'Toplam_Yillik_Ucret' in df_yatili.columns else 0.0
+            toplam_odenen = df_yatili['Odenen_Toplam'].sum() if 'Odenen_Toplam' in df_yatili.columns else 0.0
+            
+            col1.metric("Toplam Beklenen Gelir", f"{toplam_borc:,.2f} ₺")
+            col2.metric("Tahsil Edilen", f"{toplam_odenen:,.2f} ₺", delta=f"{toplam_odenen - toplam_borc:,.2f} ₺")
+            
             st.dataframe(df_yatili, use_container_width=True)
+        else:
+            st.warning(f"'{SHEET_YATILI}' sayfasında veri bulunamadı veya sütun başlıkları hatalı.")
             
     with tab2:
         st.subheader("Yemek Ödemeleri")

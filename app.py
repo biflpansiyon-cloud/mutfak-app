@@ -15,7 +15,7 @@ sys.path.append(current_dir)
 try:
     import modules
     st.success("✅ 'modules' klasörü bulundu!")
-    from modules.utils import check_password
+    from modules.utils import check_password, fetch_google_models
     from modules import irsaliye, fatura, menu, finans
 except ImportError as e:
     st.error(f"🚨 MODÜL HATASI DEVAM EDİYOR: {e}")

@@ -48,8 +48,28 @@ with st.sidebar:
     ])
     
     st.divider()
-    models = ["models/gemini-2.5-flash", "models/gemini-exp-1206", "models/gemini-1.5-flash"]
-    sel_model = st.selectbox("Yapay Zeka", models)
+    st.header("⚙️ Model Ayarı")
+    
+    # Favori modellerimiz (İnternet yoksa veya API hatası varsa bunlar görünür)
+    favorite_models = ["models/gemini-2.5-flash", "models/gemini-exp-1206", "models/gemini-1.5-flash"]
+    
+    # 1. Güncelleme Butonu
+    if st.button("Listeyi Google'dan Güncelle"):
+        fetched = fetch_google_models() # Utils'den çağırıyoruz
+        if fetched:
+            # Favorilerle gelenleri birleştirip session'a atıyoruz
+            st.session_state['model_list'] = sorted(list(set(favorite_models + fetched)))
+            st.success("Liste güncellendi!")
+    
+    # 2. Listeyi Belirle (Session'da varsa onu kullan, yoksa favorileri)
+    current_list = st.session_state.get('model_list', favorite_models)
+    
+    # 3. Varsayılan Seçim (2.5 Flash varsa onu seçili getir)
+    def_ix = 0
+    if "models/gemini-2.5-flash" in current_list:
+        def_ix = current_list.index("models/gemini-2.5-flash")
+        
+    sel_model = st.selectbox("Model Seç:", current_list, index=def_ix)
 
 # 3. Yönlendirme
 if page == "📝 Günlük İrsaliye":

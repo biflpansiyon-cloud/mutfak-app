@@ -12,6 +12,9 @@ SETTINGS_SHEET_NAME = "AYARLAR"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
+# modules/utils.py içine
+SHEET_SETTINGS = "FINANS_AYARLAR" 
+# ... (diğer sheet adları) ...
 
 # --- GÜVENLİK ---
 # modules/utils.py içinde check_password fonksiyonunun son ve hatasız hali

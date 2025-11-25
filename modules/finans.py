@@ -3,14 +3,15 @@ import pandas as pd
 import google.generativeai as genai
 import io
 import json
-import datetime 
+import datetime
+import difflib # İsim benzerliği ve eşleştirme için
 from modules.utils import get_gspread_client, get_drive_service, find_folder_id, SHEET_YATILI, SHEET_GUNDUZLU, SHEET_SETTINGS
 
 # --- GEMINI AYARLARI ---
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 # =========================================================================
-# 1. ORTAK VERİ YÖNETİMİ FONKSİYONLARI (Sheets)
+# 1. ORTAK VERİ YÖNETİMİ VE AYAR FONKSİYONLARI
 # =========================================================================
 
 def get_data(sheet_name):
@@ -42,16 +43,16 @@ def get_current_unit_price():
             
             if not s_price: return 0.0
 
-            # 1000 TL üzeri koruması
+            # 1000 TL üzeri koruması (Hatalı 7315 kayıtları için)
             if "." in s_price and "," not in s_price:
                  temp_val = float(s_price.replace(".", ""))
                  if temp_val > 1000:
                      return temp_val / 100
             
-            # Virgül düzeltmesi
+            # Virgül düzeltmesi (Türkçe format -> Python format)
             if "," in s_price:
-                s_price = s_price.replace(".", "") 
-                s_price = s_price.replace(",", ".") 
+                s_price = s_price.replace(".", "") # Binlik noktasını at
+                s_price = s_price.replace(",", ".") # Virgülü nokta yap
             
             return float(s_price)
             
@@ -66,6 +67,7 @@ def update_unit_price(new_price, year):
         sh = client.open("Mutfak_Takip")
         ws = sh.worksheet(SHEET_SETTINGS)
         
+        # Sayıyı önce virgüle çeviriyoruz: 73.15 -> "73,15"
         price_tr_string = f"{new_price:.2f}".replace('.', ',')
         ws.append_row([year, price_tr_string, ''], value_input_option='USER_ENTERED') 
         return True
@@ -85,6 +87,10 @@ def update_annual_taksit(total_fee, year):
         st.error(f"Taksit tutarı güncelleme hatası: {e}")
         return False
 
+# =========================================================================
+# 2. İŞ MANTIĞI (TAHAKKUK, DAĞITIM, ÖDEME İŞLEME)
+# =========================================================================
+
 def generate_monthly_accrual(selected_month, days_eaten, unit_price):
     """Tüm gündüzlü öğrenciler için aylık tahakkuku hesaplar ve Sheets'e kaydeder."""
     try:
@@ -93,6 +99,7 @@ def generate_monthly_accrual(selected_month, days_eaten, unit_price):
         ws = sh.worksheet(SHEET_GUNDUZLU)
         
         df_gunduzlu_all = get_data(SHEET_GUNDUZLU)
+        # Sadece benzersiz öğrencileri al
         unique_students = df_gunduzlu_all[['TC_No', 'Ad_Soyad', 'Sinif']].drop_duplicates()
         
         tahakkuk_tutar = days_eaten * unit_price
@@ -136,7 +143,7 @@ def distribute_yatili_installments(total_fee, year):
         
         # Eğer sayfa tamamen boşsa
         if not all_values:
-            headers = ["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]
+            headers = ["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Odenen_Toplam", "Kalan_Borc", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]
             ws.append_row(headers)
             return False, "Sayfa boştu, başlıklar eklendi. Lütfen A sütununa (Ad_Soyad) isimleri girip tekrar deneyin."
 
@@ -146,6 +153,7 @@ def distribute_yatili_installments(total_fee, year):
         
         start_index = 0
         first_cell = all_values[0][0].lower() if all_values[0] else ""
+        # Başlık satırını atlamak için kontrol
         if "ad" in first_cell or "isim" in first_cell or "name" in first_cell or "tc" in first_cell:
             start_index = 1
             
@@ -161,7 +169,7 @@ def distribute_yatili_installments(total_fee, year):
         # 3. Yeni Veri Setini Hazırla
         installment_amount = total_fee / 4.0
         
-        new_data = [["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]]
+        new_data = [["Ad_Soyad", "Sinif", "Toplam_Yillik_Ucret", "Odenen_Toplam", "Kalan_Borc", "Taksit1_Tutar", "Taksit2_Tutar", "Taksit3_Tutar", "Taksit4_Tutar"]]
         
         for i, name in enumerate(student_names):
             sinif = existing_classes[i] if i < len(existing_classes) else ""
@@ -169,6 +177,8 @@ def distribute_yatili_installments(total_fee, year):
                 name,
                 sinif,
                 total_fee,
+                0, # Odenen Toplam Sıfırlanır mı? Evet, yeni yıl başlıyor.
+                total_fee, # Kalan Borç = Toplam Ücret
                 installment_amount,
                 installment_amount,
                 installment_amount,
@@ -187,9 +197,89 @@ def distribute_yatili_installments(total_fee, year):
         
     except Exception as e:
         return False, f"Hata oluştu: {e}"
+
+def find_best_match(name, name_list):
+    """Verilen isme en çok benzeyen ismi listeden bulur."""
+    matches = difflib.get_close_matches(name, name_list, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+def process_yatili_payment(analiz, dekont_link):
+    """Yatılı öğrencinin ödemesini bulur ve bakiyesinden düşer."""
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_YATILI)
         
+        all_data = ws.get_all_records()
+        df = pd.DataFrame(all_data)
+        
+        # Öğrenciyi Bul (İsim Benzerliği)
+        aranan_isim = analiz.get('ogrenci_ad', '')
+        if not aranan_isim:
+            return False, "Dekontta öğrenci adı bulunamadı."
+            
+        mevcut_isimler = df['Ad_Soyad'].tolist()
+        bulunan_isim = find_best_match(aranan_isim, mevcut_isimler)
+        
+        if not bulunan_isim:
+            return False, f"'{aranan_isim}' adlı öğrenci listede bulunamadı."
+            
+        # Satır Numarası (Index + 2)
+        row_index = df[df['Ad_Soyad'] == bulunan_isim].index[0]
+        sheet_row_num = row_index + 2 
+        
+        # Hesaplama
+        current_paid = df.at[row_index, 'Odenen_Toplam']
+        if current_paid == '' or current_paid is None: current_paid = 0
+        current_paid = float(str(current_paid).replace(',', '').strip() or 0)
+        
+        payment_amount = float(analiz.get('tutar', 0))
+        new_total_paid = current_paid + payment_amount
+        
+        total_fee = df.at[row_index, 'Toplam_Yillik_Ucret']
+        total_fee = float(str(total_fee).replace(',', '').strip() or 0)
+        
+        new_remaining = total_fee - new_total_paid
+        
+        # Güncelleme
+        # Sütun indekslerini bul (1-based)
+        # Odenen_Toplam -> 4. sütun (D), Kalan_Borc -> 5. sütun (E) (Yukarıdaki create fonksiyonuna göre)
+        # Garanti olsun diye adından bulalım
+        headers = df.columns.tolist()
+        col_odenen = headers.index('Odenen_Toplam') + 1
+        col_kalan = headers.index('Kalan_Borc') + 1
+        
+        ws.update_cell(sheet_row_num, col_odenen, new_total_paid)
+        ws.update_cell(sheet_row_num, col_kalan, new_remaining)
+        
+        return True, f"{bulunan_isim} hesabına {payment_amount} TL işlendi. Kalan Borç: {new_remaining} TL"
+        
+    except Exception as e:
+        return False, f"Yatılı işleme hatası: {e}"
+
+def write_to_gunduzlu_sheet(analiz_sonucu, dekont_link):
+    """Gündüzlü öğrencilerin yemek ödeme dekontunu Sheets'e kaydeder."""
+    try:
+        client = get_gspread_client()
+        sh = client.open("Mutfak_Takip")
+        ws = sh.worksheet(SHEET_GUNDUZLU)
+        new_row = [
+            analiz_sonucu.get('ogrenci_tc', ''),
+            analiz_sonucu.get('ogrenci_ad', 'Bilinmiyor'),
+            '', 
+            analiz_sonucu.get('tarih', ''), 
+            '', '', 
+            analiz_sonucu.get('tutar', 0),
+            'Ödendi', dekont_link
+        ]
+        ws.append_row(new_row, value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"Sheets'e yazma hatası (Gündüzlü): {e}")
+        return False
+
 # =========================================================================
-# 2. DRIVE VE GEMINI FONKSİYONLARI 
+# 3. DRIVE VE GEMINI ENTEGRASYONU
 # =========================================================================
 
 def download_file_from_drive(service, file_id):
@@ -240,28 +330,8 @@ def move_file_in_drive(service, file_id, source_folder_id, destination_folder_id
         st.error(f"Dosya taşıma hatası: {e}")
         return False
 
-def write_to_gunduzlu_sheet(analiz_sonucu, dekont_link):
-    try:
-        client = get_gspread_client()
-        sh = client.open("Mutfak_Takip")
-        ws = sh.worksheet(SHEET_GUNDUZLU)
-        new_row = [
-            analiz_sonucu.get('ogrenci_tc', ''),
-            analiz_sonucu.get('ogrenci_ad', 'Bilinmiyor'),
-            '', 
-            analiz_sonucu.get('tarih', ''), 
-            '', '', 
-            analiz_sonucu.get('tutar', 0),
-            'Ödendi', dekont_link
-        ]
-        ws.append_row(new_row, value_input_option='USER_ENTERED')
-        return True
-    except Exception as e:
-        st.error(f"Sheets'e yazma hatası (Gündüzlü): {e}")
-        return False
-
 # =========================================================================
-# 3. RENDER FONKSİYONU
+# 4. RENDER FONKSİYONU (UI)
 # =========================================================================
 
 def render_page(selected_model):
@@ -355,26 +425,56 @@ def render_page(selected_model):
             if st.session_state.get('last_analysis') and st.session_state.get('last_file_id') == selected_file_id:
                 st.subheader("İşlem Onayı")
                 analiz = st.session_state['last_analysis']
-                st.warning(f"⚠️ Dekont tahmini **{analiz['tur_tahmini']}** olarak belirlendi.")
                 
-                if st.button("💾 Veritabanına Kaydet ve Drive'da Taşı"):
-                    if analiz['tur_tahmini'] == 'YEMEK':
-                        dekont_link = f"https://drive.google.com/file/d/{selected_file_id}/view?usp=drivesdk" 
-                        if write_to_gunduzlu_sheet(analiz, dekont_link):
-                            st.success("1/2: Veri Gündüzlü Sheet'e başarıyla kaydedildi!")
-                            if move_file_in_drive(service, selected_file_id, target_id, processed_id):
-                                st.success("2/2: Dosya 'Islenenler' klasörüne taşındı.")
-                                del st.session_state['last_analysis']
-                                del st.session_state['last_file_id']
-                                st.rerun() 
-                            else:
-                                st.error("2/2: Dosya taşıma başarısız oldu.")
-                        else:
-                            st.error("1/2: Sheets'e kaydetme başarısız oldu.")
-                    else:
-                        st.error("Bu TAKSİT ödemesidir. Şu an sadece YEMEK ödemeleri otomatik kaydedilmektedir.")
+                tur_renk = "blue" if analiz['tur_tahmini'] == 'YEMEK' else "red"
+                st.markdown(f"Bu dekontun **:{tur_renk}[{analiz['tur_tahmini']}]** ödemesi olduğu tahmin ediliyor.")
+                
+                # Manuel Düzeltme
+                with st.expander("Analiz Sonuçlarını Düzenle (Hata varsa)", expanded=False):
+                    with st.form("edit_analysis"):
+                        yeni_ad = st.text_input("Öğrenci Adı", value=analiz.get('ogrenci_ad', ''))
+                        yeni_tutar = st.number_input("Tutar", value=float(analiz.get('tutar', 0.0)))
+                        yeni_tur = st.selectbox("Ödeme Türü", ["YEMEK", "TAKSİT"], index=0 if analiz['tur_tahmini']=='YEMEK' else 1)
+                        
+                        if st.form_submit_button("Verileri Güncelle"):
+                            st.session_state['last_analysis']['ogrenci_ad'] = yeni_ad
+                            st.session_state['last_analysis']['tutar'] = yeni_tutar
+                            st.session_state['last_analysis']['tur_tahmini'] = yeni_tur
+                            st.rerun()
 
-    # --- TAB 4: AYARLAR VE TAHAKKUK (DÜZELTİLMİŞ) ---
+                if st.button("💾 Veritabanına Kaydet ve Arşivle"):
+                    dekont_link = f"https://drive.google.com/file/d/{selected_file_id}/view?usp=drivesdk" 
+                    basari = False
+                    mesaj = ""
+                    
+                    with st.spinner("Veritabanına işleniyor..."):
+                        if analiz['tur_tahmini'] == 'YEMEK':
+                            if write_to_gunduzlu_sheet(analiz, dekont_link):
+                                basari = True
+                                mesaj = "Gündüzlü listesine eklendi."
+                            else:
+                                mesaj = "Gündüzlü sayfasına yazılamadı."
+                        elif analiz['tur_tahmini'] == 'TAKSİT':
+                            is_success, msg = process_yatili_payment(analiz, dekont_link)
+                            if is_success:
+                                basari = True
+                                mesaj = msg
+                            else:
+                                mesaj = msg
+                    
+                    if basari:
+                        st.success(f"✅ {mesaj}")
+                        if move_file_in_drive(service, selected_file_id, target_id, processed_id):
+                            st.info("📂 Dosya 'Islenenler' klasörüne kaldırıldı.")
+                            del st.session_state['last_analysis']
+                            del st.session_state['last_file_id']
+                            st.rerun()
+                        else:
+                            st.error("Veri işlendi ama dosya taşınamadı.")
+                    else:
+                        st.error(f"❌ İşlem Başarısız: {mesaj}")
+
+    # --- TAB 4: AYARLAR VE TAHAKKUK ---
     with tab4:
         st.subheader("⚙️ Finans Ayarları ve Aylık Giriş")
         
@@ -434,7 +534,7 @@ def render_page(selected_model):
             
         st.divider() 
         
-        # 3. YATILI TAKSİT DAĞITIMI (BURASI DÜZELDİ!)
+        # 3. YATILI TAKSİT DAĞITIMI
         st.markdown("#### 🏫 Yatılı Öğrenci Taksit Ayarları")
         
         with st.form("taksit_form"):
@@ -447,16 +547,12 @@ def render_page(selected_model):
             taksit_submit = st.form_submit_button("Taksit Ayarlarını Kaydet ve Dağıt")
             
             if taksit_submit:
-                # --- KRİTİK DÜZELTME BURADA ---
-                # Eskiden sadece update_annual_taksit çağrılıyordu.
-                # Şimdi asıl işi yapan distribute_yatili_installments çağrılıyor.
-                
                 with st.spinner("Öğrenci borçları güncelleniyor..."):
+                    # Bu fonksiyon artık bağlı!
                     basari, mesaj = distribute_yatili_installments(yillik_taksit_toplam, taksit_yil)
                     
                     if basari:
                         st.success(f"✅ {mesaj}")
-                        # Veriyi tazelemek için sayfayı yenile
                         st.rerun()
                     else:
                         st.error(f"❌ Hata: {mesaj}")

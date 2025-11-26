@@ -17,8 +17,8 @@ ACTIVE_MENU_SHEET_NAME = "AKTIF_MENU"
 GUNLER_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
 # Yasaklı Eşleşmeler
-YOGURTLU_CORBALAR = ["YAYLA", "YOĞURT", "DÜĞÜN", "ERİŞTE"] 
-YOGURT_YAN_URUNLER = ["CACIK", "AYRAN", "YOĞURT", "HAYDARİ"] 
+YOGURTLU_CORBALAR = ["YAYLA", "YOĞURT", "DÜĞÜN", "ERİŞTE", "PİRİNÇ"] 
+YOGURT_YAN_URUNLER = ["CACIK", "AYRAN", "YOĞURT", "HAYDARİ", "YOĞURTLU"] 
 
 # =========================================================
 # 💾 VERİTABANI İŞLEMLERİ
@@ -84,7 +84,7 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
     for dish in candidates:
         name = dish['YEMEK ADI']
         name_upper = name.upper()
-        p_type = dish.get('PROTEIN_TURU', '').strip() # Protein türünü al
+        p_type = dish.get('PROTEIN_TURU', '').strip() # Protein türü
         
         # 1. LIMIT ve ARA
         count_used = len(usage_history.get(name, []))
@@ -97,14 +97,13 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
         if constraints.get('block_equipment') and dish.get('PISIRME_EKIPMAN') == constraints['block_equipment']: continue
         if constraints.get('force_equipment') and dish.get('PISIRME_EKIPMAN') != constraints['force_equipment']: continue
 
-        # 3. PROTEIN KONTROLÜ (GELİŞMİŞ)
-        # A) Yasaklı Protein (Örn: Ana yemek etliyse, yan yemek etli olmasın)
+        # 3. PROTEIN KONTROLÜ (DEMİR YUMRUK MODU)
+        # Eğer yasaklı listesi varsa, o listedeki HİÇBİR protein türünü kabul etme.
         if constraints.get('block_protein_list'):
             if p_type in constraints['block_protein_list']: continue
             
-        # B) Zorunlu Protein (Örn: Ana yemek etsizse, yan yemek etli olsun)
-        # Not: Bu zorunluluğu esnek tutuyoruz, eğer havuzda yoksa pas geçeriz.
-        # Bu filtrelemeyi aşağıda "Soft Filter" olarak yapacağız.
+        # Zorunlu Protein
+        if constraints.get('force_protein_types') and p_type not in constraints['force_protein_types']: continue
         
         # 4. YASAKLI İSİMLER
         if constraints.get('exclude_names') and name in constraints['exclude_names']: continue
@@ -113,30 +112,25 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
 
         valid_options.append(dish)
     
-    # --- SOFT FILTER (Tercih Edilen Özellikler) ---
-    # Eğer zorunlu protein isteniyorsa ve listede varsa, sadece onları filtrele.
-    # Yoksa mecburen diğerlerine razı ol (Sistem kilitlenmesin).
-    if constraints.get('force_protein_list') and valid_options:
-        preferred = [d for d in valid_options if d.get('PROTEIN_TURU', '').strip() in constraints['force_protein_list']]
-        if preferred:
-            valid_options = preferred
-
     if not valid_options:
-        if candidates: return random.choice(candidates)
+        # Eğer hiç seçenek kalmazsa, kategoriden rastgele ver (Sistem çökmesin diye)
+        if candidates: 
+            chosen = random.choice(candidates)
+            chosen['YEMEK ADI'] = f"{chosen['YEMEK ADI']} (Kural Dışı)" # Uyarı olarak işaretle
+            return chosen
         return {"YEMEK ADI": f"---", "PISIRME_EKIPMAN": "", "PROTEIN_TURU": ""}
     
     chosen = random.choice(valid_options)
-    # Kayıt işlemi ana döngüde
     return chosen
 
 def record_usage(dish, usage_history, day):
-    name = dish['YEMEK ADI']
+    name = dish['YEMEK ADI'].replace(" (Kural Dışı)", "")
     if name == "---": return
     if name not in usage_history: usage_history[name] = []
     usage_history[name].append(day)
 
 # =========================================================
-# 🧠 ANA ALGORİTMA (ANA YEMEK ODAKLI)
+# 🧠 ANA ALGORİTMA
 # =========================================================
 
 def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
@@ -152,7 +146,7 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
     for day in range(1, num_days + 1):
         current_date = datetime(year, month, day)
         date_str = current_date.strftime("%d.%m.%Y")
-        weekday_idx = current_date.weekday() # 0=Pzt
+        weekday_idx = current_date.weekday()
         weekday_name = GUNLER_TR[weekday_idx]
         
         if any(h[0] <= current_date.date() <= h[1] for h in holidays):
@@ -173,32 +167,34 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
         is_weekend = (weekday_idx >= 5)
         
         if is_weekend:
-            # === HAFTA SONU (Öğle = Akşam) ===
-            # ÖNCE ANA YEMEK SEÇ (Patron o)
+            # === HAFTA SONU ===
+            # 1. ANA YEMEK SEÇ
             ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, constraints={"exclude_names": daily_exclude})
-            ana_protein = ana.get('PROTEIN_TURU', '').strip()
+            ana_p_type = ana.get('PROTEIN_TURU', '').strip()
             
-            # Yan Yemek Kısıtlamaları
+            # 2. YAN ÜRÜN KISITLAMALARI (Ana Yemek Etliyse -> Yanlar ETSIZ olsun)
             side_constraints = {"exclude_names": daily_exclude}
             if ana.get('PISIRME_EKIPMAN') == 'FIRIN': side_constraints['block_equipment'] = 'FIRIN'
             
-            # PROTEIN DENGESİ: Ana yemek Etliyse -> Yanlar Etsiz olsun
-            if ana_protein in ['KIRMIZI', 'BEYAZ']:
-                side_constraints['block_protein_list'] = ['KIRMIZI', 'BEYAZ']
-            # Ana yemek Etsiz ise -> Yanlar Etli olsun (Tercihen)
-            elif ana_protein == 'ETSIZ':
-                side_constraints['force_protein_list'] = ['KIRMIZI', 'BEYAZ']
-
-            # Çorba Seçimi
+            # KURAL: Ana yemekte et varsa, yan ürünlerde hiçbir et türü olmasın!
+            if ana_p_type in ['KIRMIZI', 'BEYAZ', 'BALIK']:
+                side_constraints['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
+            
+            # Çorba
             corba = select_dish(pool, "ÇORBA", usage_history, current_date, constraints=side_constraints)
             if any(x in corba['YEMEK ADI'].upper() for x in YOGURTLU_CORBALAR): side_constraints['exclude_keywords'] = YOGURT_YAN_URUNLER
             
-            # Yan Yemek Seçimi
+            # Yan Yemek
             if ana.get('ZORUNLU_ES'): yan = {"YEMEK ADI": ana['ZORUNLU_ES'], "PISIRME_EKIPMAN": "TENCERE"}
             else: yan = select_dish(pool, "YAN YEMEK", usage_history, current_date, side_constraints)
             
+            # Tamamlayıcı
             tamm_constraints = {"exclude_names": daily_exclude}
+            # Tamamlayıcıda da et olmasın (Cacık vb. serbest, ama etli dolma olmasın)
+            if ana_p_type in ['KIRMIZI', 'BEYAZ', 'BALIK']:
+                tamm_constraints['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
             if 'exclude_keywords' in side_constraints: tamm_constraints['exclude_keywords'] = side_constraints['exclude_keywords']
+            
             tamm = select_dish(pool, "TAMAMLAYICI", usage_history, current_date, tamm_constraints)
             
             ogle_corba = aksam_corba = corba
@@ -217,19 +213,18 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
             ogle_yan = {"YEMEK ADI": "Salata"}
             ogle_tamm = {"YEMEK ADI": "Tahin Helvası"}
             
-            # Akşam (Çorba aynı, Ana farklı)
+            # Akşam
             aksam_corba = ogle_corba
-            
-            dinner_main_constraints = {"exclude_names": daily_exclude}
-            aksam_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, dinner_main_constraints)
+            dinner_main_cons = {"exclude_names": daily_exclude, "block_protein_list": ['BALIK']}
+            aksam_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, dinner_main_cons)
             record_usage(aksam_ana, usage_history, day)
             
-            # Akşam Yan Ürünler (Protein Dengesine Göre)
-            aksam_p_type = aksam_ana.get('PROTEIN_TURU', '').strip()
+            # Akşam Yan Ürünler (Protein Yasaklı)
+            a_p_type = aksam_ana.get('PROTEIN_TURU', '').strip()
             aksam_side_cons = {"exclude_names": daily_exclude}
             
-            if aksam_p_type in ['KIRMIZI', 'BEYAZ']: aksam_side_cons['block_protein_list'] = ['KIRMIZI', 'BEYAZ']
-            elif aksam_p_type == 'ETSIZ': aksam_side_cons['force_protein_list'] = ['KIRMIZI', 'BEYAZ']
+            if a_p_type in ['KIRMIZI', 'BEYAZ']: 
+                aksam_side_cons['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
             
             if aksam_ana.get('PISIRME_EKIPMAN') == 'FIRIN': aksam_side_cons['block_equipment'] = 'FIRIN'
             
@@ -242,38 +237,41 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
 
         else:
             # === NORMAL HAFTA İÇİ ===
-            # 1. Öğle Ana Yemek (Patron)
+            # 1. Öğle Ana Yemek
             ogle_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, constraints={"exclude_names": daily_exclude})
             record_usage(ogle_ana, usage_history, day)
             o_p_type = ogle_ana.get('PROTEIN_TURU', '').strip()
             
-            # 2. Akşam Ana Yemek (Öğlenin zıttı olsun)
+            # 2. Akşam Ana Yemek (Öğlenle Zıt Protein)
             dinner_main_cons = {"exclude_names": daily_exclude + [ogle_ana['YEMEK ADI']]}
-            if o_p_type in ['KIRMIZI', 'BEYAZ']: dinner_main_cons['block_protein_list'] = [o_p_type] # Aynı et olmasın
-            if o_p_type == 'ETSIZ': dinner_main_cons['force_protein_list'] = ['KIRMIZI', 'BEYAZ'] # Akşam et olsun
+            # Eğer öğlen etliyse, akşam aynı tür et olmasın (Kırmızı-Kırmızı olmaz)
+            if o_p_type in ['KIRMIZI', 'BEYAZ']: 
+                dinner_main_cons['block_protein_list'] = [o_p_type]
+            # Eğer öğlen etsizse, akşam etli olsun
+            if o_p_type == 'ETSIZ':
+                dinner_main_cons['force_protein_types'] = ['KIRMIZI', 'BEYAZ']
             
             aksam_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, dinner_main_cons)
             record_usage(aksam_ana, usage_history, day)
             a_p_type = aksam_ana.get('PROTEIN_TURU', '').strip()
             
-            # 3. Ortak Çorba & Yan & Tamm (Her iki ana yemeğe de uymalı!)
+            # 3. Ortak Yan Yemek & Çorba Kısıtlamaları
             shared_cons = {"exclude_names": daily_exclude}
             
-            # Eğer İKİ ana yemek de ETLİ ise -> Yan yemekler kesin ETSIZ olsun
-            if o_p_type in ['KIRMIZI', 'BEYAZ'] and a_p_type in ['KIRMIZI', 'BEYAZ']:
-                shared_cons['block_protein_list'] = ['KIRMIZI', 'BEYAZ']
+            # KURAL: Eğer HERHANGİ bir ana yemek (Öğle veya Akşam) etliyse, yan ürünler ETSIZ olsun.
+            is_any_meat = (o_p_type in ['KIRMIZI', 'BEYAZ']) or (a_p_type in ['KIRMIZI', 'BEYAZ'])
+            if is_any_meat:
+                shared_cons['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
             
-            # Ekipman kontrolü (Herhangi biri fırınsa, yan fırın olmasın)
             if ogle_ana.get('PISIRME_EKIPMAN') == 'FIRIN' or aksam_ana.get('PISIRME_EKIPMAN') == 'FIRIN':
                 shared_cons['block_equipment'] = 'FIRIN'
             
-            # Çorba Seç
+            # Çorba
             shared_corba = select_dish(pool, "ÇORBA", usage_history, current_date, shared_cons)
             record_usage(shared_corba, usage_history, day)
             if any(x in shared_corba['YEMEK ADI'].upper() for x in YOGURTLU_CORBALAR): shared_cons['exclude_keywords'] = YOGURT_YAN_URUNLER
             
-            # Yan Yemek Seç
-            # Öncelik: Öğle'nin zorunlusu varsa o, yoksa Akşam'ınki, yoksa serbest
+            # Yan Yemek
             if ogle_ana.get('ZORUNLU_ES'): shared_yan = {"YEMEK ADI": ogle_ana['ZORUNLU_ES'], "PISIRME_EKIPMAN": "TENCERE"}
             elif aksam_ana.get('ZORUNLU_ES'): shared_yan = {"YEMEK ADI": aksam_ana['ZORUNLU_ES'], "PISIRME_EKIPMAN": "TENCERE"}
             else: shared_yan = select_dish(pool, "YAN YEMEK", usage_history, current_date, shared_cons)
@@ -281,6 +279,7 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
             
             # Tamamlayıcı
             tamm_cons = {"exclude_names": daily_exclude}
+            if is_any_meat: tamm_cons['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
             if 'exclude_keywords' in shared_cons: tamm_cons['exclude_keywords'] = shared_cons['exclude_keywords']
             shared_tamm = select_dish(pool, "TAMAMLAYICI", usage_history, current_date, tamm_cons)
             record_usage(shared_tamm, usage_history, day)
@@ -289,7 +288,7 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
             ogle_yan = aksam_yan = shared_yan
             ogle_tamm = aksam_tamm = shared_tamm
 
-        # --- GECE ATIŞTIRMALIK ---
+        # --- GECE ---
         gece_cons = {"exclude_names": daily_exclude}
         if weekday_idx in ready_snack_days_indices: gece_cons['force_equipment'] = 'HAZIR'
         gece = select_dish(pool, "GECE ATIŞTIRMALIK", usage_history, current_date, gece_cons)
@@ -309,6 +308,10 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
         ]
 
     return pd.DataFrame(menu_log)
+
+# =========================================================
+# 🖥️ ARAYÜZ
+# =========================================================
 
 def render_page(sel_model):
     st.header("👨‍🍳 Akıllı Menü Planlayıcı")

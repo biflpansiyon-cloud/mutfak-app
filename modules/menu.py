@@ -17,19 +17,29 @@ SABIT_KAHVALTI = "Peynir, Zeytin, Reçel, Bal, Tereyağı, Domates, Salatalık"
 
 def get_full_menu_pool(client):
     """
-    Google Sheets'ten yemek havuzunu çeker ve listeye çevirir.
+    Google Sheets'ten yemek havuzunu çeker.
     """
     try:
-        sh = client.open(FILE_MENU)
+        # --- DEĞİŞİKLİK BURADA ---
+        # Dosyayı ismiyle değil, direkt URL'si ile açıyoruz.
+        # Bu sayede robotun yanlış dosyaya gitme ihtimali %0 oluyor.
+        sheet_url = "https://docs.google.com/spreadsheets/d/1FyxQ6Vue3sp16uxD8r-1hBiICED5dkpgXQlEM_q1rll/edit"
+        
+        sh = client.open_by_url(sheet_url)
         ws = sh.worksheet(MENU_POOL_SHEET_NAME)
+        
         data = ws.get_all_values()
         
-        if not data: return []
+        # DEBUG: Ekrana bilgi yazalım (Çalışınca kaldırırsın)
+        if not data:
+            st.error("Dosya bulundu ama içi boş görünüyor!")
+            return []
         
         # Başlıkları al (1. Satır)
         header = [h.strip().upper() for h in data[0]]
         pool = []
         
+        # Veri satırlarını işle (2. Satırdan başla)
         for row in data[1:]:
             item = {}
             # Satırı başlıklarla eşleştir
@@ -47,8 +57,9 @@ def get_full_menu_pool(client):
             pool.append(item)
             
         return pool
+        
     except Exception as e:
-        st.error(f"Veri çekme hatası: {e}")
+        st.error(f"DETAYLI HATA RAPORU: {e}")
         return []
 
 def select_dish(pool, category, usage_history, current_day_obj, constraints=None):

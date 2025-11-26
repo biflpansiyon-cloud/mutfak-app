@@ -1,5 +1,3 @@
-# modules/utils.py (ESKİ SAĞLAM VERSİYON)
-
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -8,50 +6,37 @@ import re
 import difflib
 import requests
 
-# ... (Sheet adları ve diğer sabitler aynen kalsın) ...
+# --- SABİTLER ---
 SHEET_NAME = "Mutfak_Takip"
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
-SHEET_SETTINGS = "FINANS_AYARLAR"
+SHEET_SETTINGS = "FINANS_AYARLAR"  # Standart isim bu
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
+MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
-# --- check_password FONKSİYONUNU BU HALİYLE DEĞİŞTİR ---
+# --- GÜVENLİK ---
 def check_password():
-    """
-    Şifre girişini yönetir. (Session State Kullanır - En Stabil Yöntem)
-    """
-    # 1. OTURUM KONTROLÜ
-    # Eğer kullanıcı zaten girdiyse (session_state True ise), direkt True döndür.
+    """Session State tabanlı şifre kontrolü."""
     if st.session_state.get("authenticated", False):
         return True
     
-    # 2. YETKİ YOKSA FORMU GÖSTER
-    # Formu with bloğu içinde kuruyoruz ki Enter tuşu çalışsın.
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
-        
         password = st.text_input("Şifrenizi Girin:", type="password")
         submitted = st.form_submit_button("Giriş Yap")
 
-    # 3. GİRİŞ KONTROLÜ
     if submitted:
-        # Şifre kontrolü
-        expected_password = st.secrets.get("APP_PASSWORD", "varsayilan_sifre")
-        
+        expected_password = st.secrets.get("APP_PASSWORD", "admin")
         if password == expected_password: 
             st.session_state["authenticated"] = True
             st.success("Giriş Başarılı!")
-            st.rerun() # Sayfayı yenileyip içeri al
+            st.rerun()
             return True
         else:
-            st.error("Yanlış şifre. Tekrar deneyin.")
-            
-    # Eğer yetki yoksa ve giriş yapılmadıysa False döner
+            st.error("Yanlış şifre.")
     return False
 
-# ... (Geri kalan get_gspread_client vb. fonksiyonlar aynen kalsın) ...
-
-# --- BAĞLANTILAR ---
+# --- BAĞLANTILAR (SHEETS & DRIVE) ---
 def get_gspread_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -59,23 +44,18 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except Exception as e: return None
 
-# modules/utils.py içine eklenecek/güncellenecek:
-
 def get_drive_service():
-    """Google Drive API servisini başlatır."""
     scope = ['https://www.googleapis.com/auth/drive']
     try:
-        # Streamlit secrets'tan credentials oluştur
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        service = build('drive', 'v3', credentials=creds)
-        return service
+        return build('drive', 'v3', credentials=creds)
     except Exception as e:
         st.error(f"Drive Bağlantı Hatası: {e}")
         return None
 
 def find_folder_id(service, folder_name, parent_id=None):
-    """İsmi verilen klasörün ID'sini bulur."""
+    """Klasör ID bulur, yoksa oluşturur."""
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
         if parent_id:
@@ -83,28 +63,30 @@ def find_folder_id(service, folder_name, parent_id=None):
         
         results = service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
-        if files:
-            return files[0]['id'] # İlk bulduğunu döndür
-        return None
+        
+        if files: return files[0]['id']
+        
+        # Yoksa oluştur
+        meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
+        if parent_id: meta['parents'] = [parent_id]
+        
+        file = service.files().create(body=meta, fields='id').execute()
+        return file.get('id')
     except Exception as e:
-        st.error(f"Klasör arama hatası ({folder_name}): {e}")
         return None
-
-# modules/utils.py dosyasına eklenecek:
 
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            # Sadece içerik üreten (generateContent) modelleri alıp sıralıyoruz
+        res = requests.get(url)
+        if res.status_code == 200:
+            data = res.json()
             return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
         return []
     except: return []
 
-# --- TEMİZLİK VE DÜZENLEME ---
+# --- YARDIMCI FONKSİYONLAR ---
 def clean_number(num_str):
     try:
         clean = re.sub(r'[^\d.,-]', '', str(num_str))
@@ -145,13 +127,14 @@ def get_or_create_worksheet(sh, title, cols, header):
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
-# --- İSİM ÇÖZÜCÜLER (HEM İRSALİYE HEM FATURA KULLANIR) ---
+# --- İSİM ÇÖZÜCÜLER (Hata Düzeltildi) ---
 def resolve_company_name(ocr_name, client, known_companies=None):
     std_name = standardize_name(ocr_name)
     try:
         sh = client.open(SHEET_NAME)
         try:
-            ws = sh.worksheet(SETTINGS_SHEET_NAME)
+            # DÜZELTME: Artık doğru sabit değişkeni kullanıyoruz
+            ws = sh.worksheet(SHEET_SETTINGS) 
             data = ws.get_all_values()
             alias_map = {}
             for row in data[1:]:
@@ -175,7 +158,7 @@ def resolve_product_name(ocr_prod, client):
     clean_prod = ocr_prod.replace("*", "").strip()
     try:
         sh = client.open(SHEET_NAME)
-        try: ws = sh.worksheet(SETTINGS_SHEET_NAME)
+        try: ws = sh.worksheet(SHEET_SETTINGS) # Düzeltildi
         except: return clean_prod
         data = ws.get_all_values()
         product_map = {}
@@ -210,39 +193,3 @@ def get_price_database(client):
                 price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
         return price_db
     except: return {}
-
-# 26 kasım 2025 modules/utils.py içine bu fonksiyonları ekleyin/değiştirin
-# ... (Diğer importlar ve fonksiyonlar aynen kalmalı) ...
-
-# --- GOOGLE BAĞLANTILARI (DRIVE) ---
-# ... (get_drive_service fonksiyonu aynen kalsın) ...
-
-def find_folder_id(service, folder_name, parent_id=None):
-    """İsmi verilen klasörün ID'sini bulur. Yoksa oluşturur."""
-    try:
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-        if parent_id:
-            query += f" and '{parent_id}' in parents"
-        
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        
-        if files:
-            # Klasör bulundu
-            return files[0]['id']
-        
-        # Klasör bulunamazsa: OLUŞTUR
-        file_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        if parent_id:
-            file_metadata['parents'] = [parent_id]
-            
-        file = service.files().create(body=file_metadata, fields='id').execute()
-        st.success(f"📂 Drive klasörü '{folder_name}' otomatik oluşturuldu.")
-        return file.get('id')
-        
-    except Exception as e:
-        st.error(f"Klasör işlem hatası ({folder_name}): {e}")
-        return None

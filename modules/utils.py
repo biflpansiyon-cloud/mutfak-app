@@ -7,7 +7,7 @@ import difflib
 import requests
 
 # =========================================================
-# 📂 DOSYA İSİMLERİ ( SENİN DRİVE YAPINA GÖRE )
+# 📂 DOSYA İSİMLERİ (Senin Ekran Görüntüne Göre)
 # =========================================================
 
 FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura/İrsaliye
@@ -44,7 +44,7 @@ def check_password():
 
 def get_gspread_client():
     try:
-        # KAPSAM (SCOPE) AYARI - Robotun yetki alanı
+        # KAPSAM (SCOPE) - Robotun hem Sheets hem Drive yetkisi olsun
         scope = [
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
@@ -55,6 +55,7 @@ def get_gspread_client():
         st.error(f"Sheets Bağlantı Hatası: {e}")
         return None
 
+# --- DRIVE SERVİSİ (Finans Modülü İçin Geri Geldi) ---
 def get_drive_service():
     scope = ['https://www.googleapis.com/auth/drive']
     try:
@@ -62,6 +63,17 @@ def get_drive_service():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return build('drive', 'v3', credentials=creds)
     except Exception as e: return None
+
+# --- EKSİK OLAN FONKSİYON BU ---
+def find_folder_id(service, folder_name, parent_id=None):
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        if parent_id: query += f" and '{parent_id}' in parents"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        if files: return files[0]['id']
+        return None
+    except: return None
 
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]

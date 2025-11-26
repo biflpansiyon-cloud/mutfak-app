@@ -15,7 +15,7 @@ FILE_MENU = "Mutfak_Menu_Planlama"
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
 SHEET_FINANS_AYARLAR = "FINANS_AYARLAR"
-SHEET_STOK_AYARLAR = "AYARLAR"
+SHEET_STOK_AYARLAR = "AYARLAR" # Firma listesi burada (A Sütunu)
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
@@ -42,7 +42,7 @@ def get_gspread_client():
     except: return None
 
 def get_drive_service():
-    """Drive API servisini başlatır (Finans modülü için gerekli)."""
+    """Finans modülü için Drive servisi."""
     scope = ['https://www.googleapis.com/auth/drive']
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
@@ -53,14 +53,13 @@ def get_drive_service():
         return None
 
 def find_folder_id(service, folder_name, parent_id=None):
-    """Klasör ID bulur."""
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
         if parent_id: query += f" and '{parent_id}' in parents"
         results = service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
         if files: return files[0]['id']
-        return None # Bulamazsa None döner (Oluşturmaya zorlamıyoruz artık)
+        return None
     except: return None
 
 def fetch_google_models():
@@ -72,6 +71,24 @@ def fetch_google_models():
             data = res.json()
             return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
         return []
+    except: return []
+
+# --- YENİ EKLENEN FONKSİYON: FİRMA LİSTESİ ---
+def get_company_list(client):
+    """AYARLAR sayfasının A sütunundan firma listesini çeker."""
+    try:
+        sh = client.open(FILE_STOK)
+        # Eğer AYARLAR sayfası yoksa oluştur
+        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
+        except: 
+            ws = sh.add_worksheet(SHEET_STOK_AYARLAR, 100, 2)
+            ws.update_cell(1, 1, "FİRMA LİSTESİ")
+            return []
+            
+        col_values = ws.col_values(1) # 1. Sütun
+        # Başlığı ve boşları at
+        companies = [c.strip() for c in col_values[1:] if c.strip()]
+        return sorted(list(set(companies)))
     except: return []
 
 # --- YARDIMCI ARAÇLAR ---
@@ -115,41 +132,24 @@ def get_or_create_worksheet(sh, title, cols, header):
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
-# --- DOSYA YÖNLENDİRMELERİ ---
-def resolve_company_name(ocr_name, client, known_companies=None):
-    std_name = standardize_name(ocr_name)
-    try:
-        sh = client.open(FILE_STOK)
-        try:
-            ws = sh.worksheet(SHEET_STOK_AYARLAR) 
-            data = ws.get_all_values()
-            alias_map = {}
-            for row in data[1:]:
-                if len(row) >= 2: alias_map[turkish_lower(row[0]).strip()] = row[1].strip()
-            key = turkish_lower(std_name)
-            if key in alias_map: return alias_map[key]
-        except: pass
-    except: pass
-    if known_companies:
-        best_db = find_best_match(std_name, known_companies, cutoff=0.6)
-        if best_db: return best_db
-    return std_name
-
-def resolve_product_name(ocr_prod, client):
+# --- STOK VERİTABANI İŞLEMLERİ ---
+def resolve_product_name(ocr_prod, client, company_name):
+    """
+    Ürün ismini, SEÇİLEN FİRMANIN veritabanında arar.
+    Artık tüm DB'yi değil, sadece o firmanın ürünlerini tarar.
+    """
     clean_prod = ocr_prod.replace("*", "").strip()
     try:
-        sh = client.open(FILE_STOK)
-        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
-        except: return clean_prod
-        data = ws.get_all_values()
-        product_map = {}
-        for row in data[1:]:
-            if len(row) >= 4:
-                if row[2] and row[3]: product_map[turkish_lower(row[2])] = row[3].strip()
-        key = turkish_lower(clean_prod)
-        if key in product_map: return product_map[key]
-        best = find_best_match(clean_prod, list(product_map.keys()), cutoff=0.85)
-        if best: return product_map[turkish_lower(best)]
+        # Fiyat Anahtarından o firmanın ürünlerini bulalım
+        # Performans için get_price_database'i kullanacağız
+        price_db = get_price_database(client)
+        
+        # Firma veritabanı var mı?
+        if company_name in price_db:
+            company_products = list(price_db[company_name].keys())
+            best = find_best_match(clean_prod, company_products, cutoff=0.7)
+            if best: return best
+            
         return clean_prod
     except: return clean_prod
 
@@ -162,7 +162,7 @@ def get_price_database(client):
         for idx, row in enumerate(data):
             if idx == 0: continue
             if len(row) >= 3:
-                ted = standardize_name(row[0])
+                ted = row[0].strip() # Artık standardize etmeye gerek yok, listeden geliyor
                 urn = row[1].strip()
                 fyt = clean_number(row[2])
                 kota = clean_number(row[5]) if len(row) >= 6 else 0.0

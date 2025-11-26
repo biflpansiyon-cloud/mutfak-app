@@ -1,125 +1,314 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 import io
-from .utils import (
+import calendar
+
+# Utils'den gerekli bağlantıları çekiyoruz
+from modules.utils import (
     get_gspread_client, 
-    FILE_MENU, # Yeni Dosya
+    FILE_MENU, 
     MENU_POOL_SHEET_NAME
 )
 
+# --- SABİT LİSTELER (Kodun içine gömülü) ---
+SABIT_KAHVALTI = "Peynir, Zeytin, Reçel, Bal, Tereyağı, Domates, Salatalık"
+
 def get_full_menu_pool(client):
+    """
+    Google Sheets'ten yemek havuzunu çeker ve listeye çevirir.
+    """
     try:
-        sh = client.open(FILE_MENU) # Değişiklik burada
+        sh = client.open(FILE_MENU)
         ws = sh.worksheet(MENU_POOL_SHEET_NAME)
         data = ws.get_all_values()
+        
         if not data: return []
+        
+        # Başlıkları al (1. Satır)
         header = [h.strip().upper() for h in data[0]]
         pool = []
+        
         for row in data[1:]:
             item = {}
+            # Satırı başlıklarla eşleştir
             while len(row) < len(header): row.append("")
-            for i, col_name in enumerate(header): item[col_name] = row[i].strip()
-            item['LIMIT'] = int(item['LIMIT']) if item.get('LIMIT') else 99
-            item['ARA'] = int(item['ARA']) if item.get('ARA') else 0
+            for i, col_name in enumerate(header): 
+                item[col_name] = row[i].strip()
+            
+            # Sayısal Değerleri Temizle
+            try: item['LIMIT'] = int(item['LIMIT']) if item.get('LIMIT') else 99
+            except: item['LIMIT'] = 99
+            
+            try: item['ARA'] = int(item['ARA']) if item.get('ARA') else 0
+            except: item['ARA'] = 0
+            
             pool.append(item)
+            
         return pool
-    except: return []
+    except Exception as e:
+        st.error(f"Veri çekme hatası: {e}")
+        return []
 
-# ... (generate_smart_menu ve render_page fonksiyonları tamamen aynı kalacak) ...
-# Çünkü sadece veriyi çektiğimiz kaynağı değiştirdik.
-def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
-    start_date = datetime(year, month_index, 1)
-    if month_index == 12: next_month = datetime(year + 1, 1, 1)
-    else: next_month = datetime(year, month_index + 1, 1)
-    num_days = (next_month - start_date).days
+def select_dish(pool, category, usage_history, current_day_obj, constraints=None):
+    """
+    Verilen kategori ve kısıtlamalara göre havuzdan BİR yemek seçer.
+    """
+    if constraints is None: constraints = {}
+    
+    # 1. KATEGORİ FİLTRESİ
+    candidates = [d for d in pool if d.get('KATEGORİ') == category]
+    
+    # 2. BALIK FİLTRESİ (Normal seçimlerde BALIK gelmesin)
+    # Eğer özel olarak 'force_fish' denmediyse, balıkları ele.
+    if not constraints.get('force_fish'):
+        candidates = [d for d in candidates if d.get('PROTEIN_TURU') != 'BALIK']
+    
+    # 3. KISITLAMALAR
+    valid_options = []
+    for dish in candidates:
+        name = dish['YEMEK ADI']
+        
+        # A) LIMIT Kontrolü (Ayda kaç kez?)
+        count_used = len(usage_history.get(name, []))
+        if count_used >= dish['LIMIT']: 
+            continue
+            
+        # B) ARA Kontrolü (Üst üste gelmesin)
+        if count_used > 0:
+            last_seen_day = usage_history[name][-1]
+            days_passed = current_day_obj.day - last_seen_day
+            if days_passed <= dish['ARA']: 
+                continue
+                
+        # C) EKİPMAN Kontrolü (İki fırın yemeği olmasın)
+        if constraints.get('block_equipment'):
+            if dish.get('PISIRME_EKIPMAN') == constraints['block_equipment']:
+                continue
+                
+        # D) PROTEIN Kontrolü (Öğlen Etsiz yendiyse Akşam Etli olsun)
+        if constraints.get('force_protein_types'):
+            p_type = dish.get('PROTEIN_TURU', '')
+            if p_type not in constraints['force_protein_types']:
+                continue
+        
+        # E) ZORUNLU HARİÇ TUTMA (Exclude)
+        if constraints.get('exclude_names'):
+            if name in constraints['exclude_names']:
+                continue
+
+        valid_options.append(dish)
+    
+    # Eğer uygun yemek kalmadıysa, kuralları esnetip tekrar deneriz (Fallback)
+    if not valid_options:
+        # En azından kategorisi tutan herhangi birini getir (Sonsuz döngü olmasın)
+        if candidates: return random.choice(candidates)
+        return {"YEMEK ADI": f"YOK: {category}", "PISIRME_EKIPMAN": "", "PROTEIN_TURU": ""}
+    
+    # 4. SEÇİM
+    chosen = random.choice(valid_options)
+    
+    # Kullanım geçmişine işle
+    if chosen['YEMEK ADI'] not in usage_history: usage_history[chosen['YEMEK ADI']] = []
+    usage_history[chosen['YEMEK ADI']].append(current_day_obj.day)
+    
+    return chosen
+
+def generate_smart_menu(month, year, pool, holidays):
+    """
+    Ana Algoritma: Ayın tüm günlerini planlar.
+    """
+    # Takvim Hazırlığı
+    num_days = calendar.monthrange(year, month)[1]
     menu_log = []
-    usage_history = {}
-    cats = {}
-    for p in pool:
-        c = p.get('KATEGORİ', '').upper()
-        if c not in cats: cats[c] = []
-        cats[c].append(p)
-    def get_candidates(category): return cats.get(category, [])
+    usage_history = {} # { "Kuru Fasulye": [1, 15], ... }
+    
+    # --- BALIK GÜNÜ BELİRLEME ---
+    # Sadece hafta içi (0-4) olan günleri bul
+    weekdays = [d for d in range(1, num_days + 1) if datetime(year, month, d).weekday() < 5]
+    fish_day = random.choice(weekdays) if weekdays else None
+    
     for day in range(1, num_days + 1):
-        current_date = datetime(year, month_index, day)
-        weekday = current_date.weekday()
+        current_date = datetime(year, month, day)
         date_str = current_date.strftime("%d.%m.%Y")
+        weekday_name = current_date.strftime("%A") # Gün adı (Locale ayarına göre değişir ama görsel için)
+        
+        # TATİL KONTROLÜ
         is_holiday = False
         for h_start, h_end in holidays:
-            if h_start <= current_date.date() <= h_end: is_holiday = True; break
+            if h_start <= current_date.date() <= h_end: 
+                is_holiday = True
+                break
+        
         if is_holiday:
-            menu_log.append({"GÜN": date_str, "KAHVALTI": "TATİL", "ÇORBA": "---", "ÖĞLE ANA": "---", "YAN": "---", "AKŞAM ANA": "---", "ARA": "---"})
+            menu_log.append({
+                "TARİH": date_str, "GÜN": "TATİL", 
+                "KAHVALTI": "---", "ÖĞLE ÇORBA": "---", "ÖĞLE ANA": "---", "ÖĞLE YAN": "---", "ÖĞLE TAMM": "---",
+                "AKŞAM ÇORBA": "---", "AKŞAM ANA": "---", "AKŞAM YAN": "---", "AKŞAM TAMM": "---",
+                "GECE": "---"
+            })
             continue
-        is_weekend = (weekday >= 5)
-        def pick_dish(category, constraints={}):
-            candidates = get_candidates(category)
-            valid_options = []
-            for dish in candidates:
-                name = dish['YEMEK ADI']
-                used_dates = usage_history.get(name, [])
-                if len(used_dates) >= dish['LIMIT']: continue
-                if used_dates:
-                    if (day - used_dates[-1]) <= dish['ARA']: continue
-                if constraints.get('block_equipment') and dish.get('PISIRME_EKIPMAN') == constraints['block_equipment']: continue
-                if constraints.get('block_protein') and dish.get('PROTEIN_TURU') == constraints['block_protein']: continue
-                if constraints.get('force_ready') and dish.get('PISIRME_EKIPMAN') != 'HAZIR': continue
-                valid_options.append(dish)
-            if not valid_options: return {"YEMEK ADI": "SEÇENEK YOK"}
-            chosen = random.choice(valid_options)
-            name = chosen['YEMEK ADI']
-            if name not in usage_history: usage_history[name] = []
-            usage_history[name].append(day)
-            return chosen
-        kahvalti = pick_dish("KAHVALTI EKSTRA")
-        corba = pick_dish("ÇORBA")
-        ogle_ana = pick_dish("ANA YEMEK")
-        if ogle_ana.get('ZORUNLU_ES'): yan = {"YEMEK ADI": ogle_ana['ZORUNLU_ES']}
-        else: yan = pick_dish("YAN YEMEK")
-        if is_weekend: aksam_ana = ogle_ana 
+
+        # ==========================
+        # 1. KAHVALTI (Sabit + Ekstra)
+        # ==========================
+        kahvalti_ekstra = select_dish(pool, "KAHVALTI EKSTRA", usage_history, current_date)
+        kahvalti_full = f"{SABIT_KAHVALTI} + {kahvalti_ekstra['YEMEK ADI']}"
+        
+        # ==========================
+        # 2. ÖĞLE YEMEĞİ
+        # ==========================
+        is_today_fish = (day == fish_day)
+        
+        if is_today_fish:
+            # --- FIX BALIK MENÜSÜ ---
+            ogle_corba = {"YEMEK ADI": "Mercimek Çorbası", "PISIRME_EKIPMAN": "TENCERE"}
+            
+            # Havuzdan 'BALIK' türündeki yemekleri bul ve birini seç
+            fish_candidates = [d for d in pool if d.get('PROTEIN_TURU') == 'BALIK']
+            if fish_candidates:
+                 ogle_ana = random.choice(fish_candidates)
+                 # Kullanım geçmişine ekle
+                 nm = ogle_ana['YEMEK ADI']
+                 if nm not in usage_history: usage_history[nm] = []
+                 usage_history[nm].append(day)
+            else:
+                 ogle_ana = {"YEMEK ADI": "BALIK (Havuzda Yok)", "PISIRME_EKIPMAN": "OCAK", "PROTEIN_TURU": "BALIK"}
+            
+            ogle_yan = {"YEMEK ADI": "Salata", "PISIRME_EKIPMAN": "HAZIR"}
+            ogle_tamm = {"YEMEK ADI": "Tahin Helvası", "PISIRME_EKIPMAN": "HAZIR"}
+            
         else:
-            constraints = {}
-            if ogle_ana.get('PISIRME_EKIPMAN') == 'FIRIN' or yan.get('PISIRME_EKIPMAN') == 'FIRIN': constraints['block_equipment'] = 'FIRIN'
-            p_type = ogle_ana.get('PROTEIN_TURU')
-            if p_type == 'KIRMIZI': constraints['block_protein'] = 'KIRMIZI'
-            elif p_type == 'BEYAZ': constraints['block_protein'] = 'BEYAZ'
-            aksam_ana = pick_dish("ANA YEMEK", constraints)
-        snack_constraints = {}
-        if weekday in ready_snack_days: snack_constraints['force_ready'] = True
-        if (ogle_ana.get('PISIRME_EKIPMAN') == 'FIRIN') or (not is_weekend and aksam_ana.get('PISIRME_EKIPMAN') == 'FIRIN'): snack_constraints['block_equipment'] = 'FIRIN'
-        ara = pick_dish("ARA ÖĞÜN", snack_constraints)
-        menu_log.append({"GÜN": date_str, "KAHVALTI": kahvalti['YEMEK ADI'], "ÇORBA": corba['YEMEK ADI'], "ÖĞLE ANA": ogle_ana['YEMEK ADI'], "YAN": yan['YEMEK ADI'], "AKŞAM ANA": aksam_ana['YEMEK ADI'], "ARA": ara['YEMEK ADI']})
+            # --- NORMAL ÖĞLE MENÜSÜ ---
+            ogle_corba = select_dish(pool, "ÇORBA", usage_history, current_date)
+            ogle_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date)
+            
+            # Yan yemek kısıtlamaları (Ana yemek Fırın ise, Yan yemek Fırın olmasın)
+            side_constraints = {}
+            if ogle_ana.get('PISIRME_EKIPMAN') == 'FIRIN': 
+                side_constraints['block_equipment'] = 'FIRIN'
+            
+            # Zorunlu Eşleşme (Kuru Fasulye -> Pilav)
+            if ogle_ana.get('ZORUNLU_ES'):
+                ogle_yan = {"YEMEK ADI": ogle_ana['ZORUNLU_ES'], "PISIRME_EKIPMAN": "TENCERE"} # Basit varsayım
+            else:
+                ogle_yan = select_dish(pool, "YAN YEMEK", usage_history, current_date, side_constraints)
+                
+            ogle_tamm = select_dish(pool, "TAMAMLAYICI", usage_history, current_date)
+
+        # ==========================
+        # 3. AKŞAM YEMEĞİ
+        # ==========================
+        aksam_corba = select_dish(pool, "ÇORBA", usage_history, current_date, constraints={"exclude_names": [ogle_corba['YEMEK ADI']]})
+        
+        # Akşam Ana Yemek Kısıtlamaları
+        dinner_main_constraints = {"exclude_names": [ogle_ana['YEMEK ADI']]}
+        
+        # Kural: Öğlen ETSIZ ise, Akşam ET olsun
+        if ogle_ana.get('PROTEIN_TURU') == 'ETSIZ':
+            dinner_main_constraints['force_protein_types'] = ['KIRMIZI', 'BEYAZ']
+            
+        aksam_ana = select_dish(pool, "ANA YEMEK", usage_history, current_date, dinner_main_constraints)
+        
+        # Akşam Yan Yemek
+        aksam_side_constraints = {}
+        if aksam_ana.get('PISIRME_EKIPMAN') == 'FIRIN': 
+            aksam_side_constraints['block_equipment'] = 'FIRIN'
+            
+        if aksam_ana.get('ZORUNLU_ES'):
+             aksam_yan = {"YEMEK ADI": aksam_ana['ZORUNLU_ES']}
+        else:
+             aksam_yan = select_dish(pool, "YAN YEMEK", usage_history, current_date, aksam_side_constraints)
+             
+        aksam_tamm = select_dish(pool, "TAMAMLAYICI", usage_history, current_date)
+
+        # ==========================
+        # 4. GECE (21:15)
+        # ==========================
+        gece = select_dish(pool, "GECE ATIŞTIRMALIK", usage_history, current_date)
+
+        # ==========================
+        # KAYIT
+        # ==========================
+        row_data = {
+            "TARİH": date_str,
+            "GÜN": weekday_name,
+            "KAHVALTI": kahvalti_full,
+            "ÖĞLE ÇORBA": ogle_corba['YEMEK ADI'],
+            "ÖĞLE ANA": ogle_ana['YEMEK ADI'],
+            "ÖĞLE YAN": ogle_yan['YEMEK ADI'],
+            "ÖĞLE TAMM": ogle_tamm['YEMEK ADI'],
+            "AKŞAM ÇORBA": aksam_corba['YEMEK ADI'],
+            "AKŞAM ANA": aksam_ana['YEMEK ADI'],
+            "AKŞAM YAN": aksam_yan['YEMEK ADI'],
+            "AKŞAM TAMM": aksam_tamm['YEMEK ADI'],
+            "GECE": f"Çay/Kahve + {gece['YEMEK ADI']}"
+        }
+        menu_log.append(row_data)
+
     return pd.DataFrame(menu_log)
 
 def render_page(sel_model):
-    st.header("👨‍🍳 Şefin Defteri")
+    st.header("👨‍🍳 Akıllı Menü Planlayıcı")
+    st.markdown("---")
+    
     col1, col2 = st.columns(2)
     with col1:
-        aylar = {1:"Ocak", 2:"Şubat", 3:"Mart", 4:"Nisan", 5:"Mayıs", 6:"Haziran", 7:"Temmuz", 8:"Ağustos", 9:"Eylül", 10:"Ekim", 11:"Kasım", 12:"Aralık"}
-        secilen_ay = st.selectbox("Ay", list(aylar.keys()), format_func=lambda x: aylar[x], index=datetime.now().month - 1)
-        year = datetime.now().year
-    with col2: ogrenci = st.number_input("Öğrenci", value=200)
-    st.write("🏖️ **Tatil Günleri**")
-    holiday_range = st.date_input("Tatil Aralığı", [], min_value=datetime(year, 1, 1), max_value=datetime(year, 12, 31))
-    holidays = []
-    if len(holiday_range) == 2: holidays.append((holiday_range[0], holiday_range[1]))
-    st.write("🍪 **Hazır Ara Öğün**")
-    days_map = {0:"Pazartesi", 1:"Salı", 2:"Çarşamba", 3:"Perşembe", 4:"Cuma", 5:"Cumartesi", 6:"Pazar"}
-    selected_snack = st.multiselect("Hangi günler hazır?", list(days_map.keys()), format_func=lambda x: days_map[x], default=[5, 6])
-    if st.button("🚀 Menü Oluştur", type="primary"):
+        # Ay Seçimi
+        months = {i: datetime(2000, i, 1).strftime('%B') for i in range(1, 13)} # Basit ay isimleri (Türkçe locale yoksa İngilizce çıkabilir, idare eder)
+        # Manuel Türkçe Ay Listesi
+        tr_aylar = {1:"Ocak", 2:"Şubat", 3:"Mart", 4:"Nisan", 5:"Mayıs", 6:"Haziran", 7:"Temmuz", 8:"Ağustos", 9:"Eylül", 10:"Ekim", 11:"Kasım", 12:"Aralık"}
+        
+        current_month = datetime.now().month
+        sel_month_idx = st.selectbox("Ay Seçin", list(tr_aylar.keys()), format_func=lambda x: tr_aylar[x], index=current_month-1)
+        sel_year = st.number_input("Yıl", value=datetime.now().year)
+
+    with col2:
+        st.info("🏖️ **Tatil Günleri:** Aşağıdan tarih aralığı seçerek o günleri boş geçebilirsiniz.")
+        holiday_start = st.date_input("Tatil Başlangıç", value=None)
+        holiday_end = st.date_input("Tatil Bitiş", value=None)
+        
+    if st.button("🚀 Menüyü Oluştur", type="primary"):
         client = get_gspread_client()
-        if client:
+        if not client:
+            st.error("Google Sheets Bağlantısı Yok!")
+            st.stop()
+            
+        with st.spinner("Yemek havuzu taranıyor, kurallar işleniyor..."):
             pool = get_full_menu_pool(client)
-            if pool:
-                with st.spinner("Kurallar işleniyor..."):
-                    df = generate_smart_menu(secilen_ay, year, pool, holidays, selected_snack)
-                    st.session_state['menu'] = df
-            else: st.error("Havuz Boş!")
-        else: st.error("Bağlantı Yok")
-    if 'menu' in st.session_state:
-        edited = st.data_editor(st.session_state['menu'], num_rows="fixed", use_container_width=True)
+            
+            if not pool:
+                st.error("Yemek havuzu boş! Lütfen 'Mutfak_Menu_Planlama' dosyasını kontrol et.")
+            else:
+                holidays = []
+                if holiday_start and holiday_end:
+                    holidays.append((holiday_start, holiday_end))
+                
+                df_menu = generate_smart_menu(sel_month_idx, sel_year, pool, holidays)
+                st.session_state['generated_menu'] = df_menu
+                st.success("Menü Hazır!")
+
+    # --- SONUÇ EKRANI ---
+    if 'generated_menu' in st.session_state:
+        st.subheader(f"📅 {tr_aylar[sel_month_idx]} {sel_year} Menüsü")
+        
+        # Excel İndirme Butonu
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            edited.to_excel(writer, sheet_name='Menu', index=False)
-        st.download_button("📥 Excel İndir", output.getvalue(), f"Menu_{aylar[secilen_ay]}.xlsx")
+            st.session_state['generated_menu'].to_excel(writer, index=False, sheet_name='Menu')
+        
+        st.download_button(
+            label="📥 Excel Olarak İndir",
+            data=output.getvalue(),
+            file_name=f"Menu_{tr_aylar[sel_month_idx]}_{sel_year}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        # Düzenlenebilir Tablo
+        edited_menu = st.data_editor(
+            st.session_state['generated_menu'],
+            num_rows="fixed",
+            use_container_width=True,
+            height=600
+        )

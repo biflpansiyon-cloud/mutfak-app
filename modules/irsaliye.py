@@ -14,12 +14,11 @@ from modules.utils import (
     get_price_database, 
     get_or_create_worksheet, 
     resolve_company_name, 
-    resolve_product_name, 
     clean_number, 
     find_best_match, 
     turkish_lower,
-    get_drive_service, # Drive servisi
-    find_folder_id,    # Klasör bulma
+    get_drive_service, 
+    find_folder_id,    
     SHEET_NAME, 
     PRICE_SHEET_NAME
 )
@@ -30,18 +29,13 @@ def upload_to_drive(image, file_name):
         service = get_drive_service()
         if not service: return False
         
-        # 1. Ana klasörü bul veya kök dizine yükle
-        # İstersen burada 'IRSALIYELER' diye bir klasör aratabiliriz
+        # Klasör ID bul veya oluştur
         folder_id = find_folder_id(service, "IRSALIYELER")
-        
-        # Eğer klasör yoksa oluşturmakla uğraşmayalım, ana dizine atsın veya manuel oluşturulsun
-        # ya da basitçe None bırakırsak 'My Drive'a atar.
         
         file_metadata = {'name': file_name}
         if folder_id:
             file_metadata['parents'] = [folder_id]
             
-        # Resmi byte formatına çevir
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG')
         img_byte_arr.seek(0)
@@ -60,7 +54,6 @@ def upload_to_drive(image, file_name):
 
 def analyze_receipt_image(image, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
-    # Model ismindeki 'models/' öneki varsa temizle, yoksa ekle (API formatına uygunluk)
     clean_model = model_name if "models/" not in model_name else model_name.replace("models/", "")
     
     img_byte_arr = io.BytesIO()
@@ -116,10 +109,8 @@ def text_to_dataframe(raw_text):
         if "|" in clean_line:
             parts = [p.strip() for p in clean_line.split('|')]
             
-            # Başlık satırını veya ayırıcıları atla
             if "TEDARİKÇİ" in parts[0].upper() or "---" in parts[0]: continue
             
-            # Eksik sütunları tamamla (en az 7 sütun olmalı)
             while len(parts) < 7: parts.append("0")
             
             data.append({
@@ -145,6 +136,7 @@ def save_receipt_dataframe(df, original_image):
     
     try:
         sh = client.open(SHEET_NAME)
+        # Fiyat anahtarını aç (stok düşmek için)
         price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
         existing_sheets = {turkish_lower(ws.title): ws for ws in sh.worksheets()}
         
@@ -153,47 +145,50 @@ def save_receipt_dataframe(df, original_image):
         
         # --- 1. VERİ İŞLEME VE STOK GÜNCELLEME ---
         for index, row in df.iterrows():
-        ocr_raw_name = str(row["TEDARİKÇİ"])
-        final_firma = resolve_company_name(ocr_raw_name, client, known_companies) # Standart İsim
-        
-        # BELGE TARİHİNİ KULLAN
-        tarih = str(row["TARİH"]) 
-        
-        urun = str(row["ÜRÜN ADI"])
-        miktar = str(row["MİKTAR"])
-        birim = str(row["BİRİM"]).upper()
-        fiyat = str(row["BİRİM FİYAT"])
-        tutar = str(row["TOPLAM TUTAR"])
-        
+            # DÜZELTME: Girintiler (Indentation) düzeltildi
+            ocr_raw_name = str(row["TEDARİKÇİ"])
+            final_firma = resolve_company_name(ocr_raw_name, client, known_companies)
+            
+            tarih = str(row["TARİH"]) 
+            urun_adi = str(row["ÜRÜN ADI"])
+            final_urun = urun_adi # Varsayılan olarak aynısı kalsın
+            
+            miktar_str = str(row["MİKTAR"])
+            m_val = clean_number(miktar_str) # Sayıya çevir
+            
+            birim = str(row["BİRİM"]).upper()
+            fiyat_str = str(row["BİRİM FİYAT"])
+            f_val = clean_number(fiyat_str)
+            
+            tutar_str = str(row["TOPLAM TUTAR"])
+            
             # Fiyat Veritabanından Çekme ve Stok Düşme
             if final_firma in price_db:
                 prods = list(price_db[final_firma].keys())
-                match_prod = find_best_match(final_urun, prods, cutoff=0.7)
+                match_prod = find_best_match(urun_adi, prods, cutoff=0.7)
                 
                 if match_prod:
                     db_item = price_db[final_firma][match_prod]
+                    final_urun = match_prod # DB'deki standart ismi al
                     
                     # Eğer faturada fiyat yoksa DB'den al
                     if f_val == 0:
                         f_val = db_item['fiyat']
-                        fiyat = str(f_val)
-                    
-                    # İsmi standartlaştır
-                    final_urun = match_prod 
+                        fiyat_str = str(f_val)
                     
                     # Tutar hesapla (Eğer eksikse)
-                    if clean_number(tutar) == 0:
-                        tutar = f"{m_val * f_val:.2f}"
+                    if clean_number(tutar_str) == 0:
+                        tutar_str = f"{m_val * f_val:.2f}"
                     
                     # --- KOTA (STOK) DÜŞME MANTIĞI ---
                     current_kota = db_item['kota']
-                    new_kota = current_kota - m_val
+                    new_kota = current_kota - m_val # Tüketim olduğu için düşüyoruz
                     row_num = db_item['row']
                     kota_updates.append({'range': f'F{row_num}', 'values': [[new_kota]]})
             
             # Firmaya göre grupla
-        if final_firma not in firm_data: firm_data[final_firma] = []
-        firm_data[final_firma].append([tarih, final_urun, miktar, birim, fiyat, "TL", tutar])
+            if final_firma not in firm_data: firm_data[final_firma] = []
+            firm_data[final_firma].append([tarih, final_urun, miktar_str, birim, fiyat_str, "TL", tutar_str])
             
         # --- 2. SHEETS'E YAZMA ---
         msg = []
@@ -212,30 +207,28 @@ def save_receipt_dataframe(df, original_image):
         # --- 3. STOK GÜNCELLEME (BATCH) ---
         if kota_updates:
             price_ws.batch_update(kota_updates)
-            msg.append(f"(Stok Güncellendi)")
+            msg.append(f"(Stoktan Düşüldü)")
             
-# --- 4. DRIVE'A RESİM YÜKLEME ---
-    if original_image:
-        first_firma = list(firm_data.keys())[0] if firm_data else "Genel"
-        
-        # Kaydedilen belge tarihini kullan (GG.AA.YYYY formatı için replace)
-        first_date = str(df.iloc[0]["TARİH"]).replace(".", "-") if not df.empty else datetime.now().strftime("%Y-%m-%d")
-        
-        file_name = f"{first_firma}_{first_date}_irsaliye.jpg"
-        
-        # Klasör oluşturma mantığı artık utils'de olduğu için burası çalışacak.
-        drive_success = upload_to_drive(original_image, file_name, mime_type="image/jpeg") 
-        if drive_success: msg.append("✅ Resim Drive'a Yüklendi")
+        # --- 4. DRIVE'A RESİM YÜKLEME ---
+        if original_image:
+            first_firma = list(firm_data.keys())[0] if firm_data else "Genel"
+            first_date = str(df.iloc[0]["TARİH"]).replace(".", "-") if not df.empty else datetime.now().strftime("%Y-%m-%d")
+            file_name = f"{first_firma}_{first_date}_irsaliye.jpg"
+            
+            drive_success = upload_to_drive(original_image, file_name) 
+            if drive_success: msg.append("✅ Resim Drive'a Yüklendi")
     
-    return True, " | ".join(msg)
+        return True, " | ".join(msg)
+
+    except Exception as e:
+        return False, f"Genel Hata: {str(e)}"
 
 
 def render_page(sel_model):
-    st.header("📝 İrsaliye Girişi")
+    st.header("📝 Tüketim Fişi (İrsaliye) Girişi")
     st.markdown("---")
     
-    # TEK SÜTUN OLARAK GERİ ALINDI
-    f = st.file_uploader("İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
+    f = st.file_uploader("Fiş/İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
     
     if f:
         img = Image.open(f)
@@ -251,10 +244,9 @@ def render_page(sel_model):
                 else:
                     st.error(f"Okuma Hatası: {raw_text}")
 
-   # EDİTÖR EKRANI
     if 'irsaliye_df' in st.session_state:
         st.subheader("İşlenecek Veri Tablosu")
-        st.info("👇 Tabloyu incele, hataları düzelt. Firma ve ürün isimleri otomatik standartlaştırılacaktır.")
+        st.info("👇 Tabloyu incele. Onayladığında tüketilen miktar stoktan düşülecektir.")
         
         edited_df = st.data_editor(
             st.session_state['irsaliye_df'],
@@ -264,7 +256,7 @@ def render_page(sel_model):
         
         st.markdown("---")
         
-        if st.button("💾 Kaydet ve İşle (Stoktan Düş)", type="primary"):
+        if st.button("💾 Kaydet ve Stoktan Düş", type="primary"):
             with st.spinner("Kaydediliyor..."):
                 img_to_save = st.session_state.get('current_image', None)
                 success, msg = save_receipt_dataframe(edited_df, img_to_save)

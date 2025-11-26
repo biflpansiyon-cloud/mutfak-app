@@ -1,6 +1,7 @@
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
 import re
 import difflib
 import requests
@@ -20,34 +21,48 @@ MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
 # --- GÜVENLİK ---
 def check_password():
-    if st.session_state.get("authenticated", False):
-        return True
-    
+    if st.session_state.get("authenticated", False): return True
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
         password = st.text_input("Şifrenizi Girin:", type="password")
-        submitted = st.form_submit_button("Giriş Yap")
-
-    if submitted:
-        expected_password = st.secrets.get("APP_PASSWORD", "admin")
-        if password == expected_password: 
-            st.session_state["authenticated"] = True
-            st.success("Giriş Başarılı!")
-            st.rerun()
-            return True
-        else:
-            st.error("Yanlış şifre.")
+        if st.form_submit_button("Giriş Yap"):
+            if password == st.secrets.get("APP_PASSWORD", "admin"): 
+                st.session_state["authenticated"] = True
+                st.rerun()
+                return True
+            else: st.error("Yanlış şifre.")
     return False
 
-# --- SHEETS BAĞLANTISI ---
+# --- GOOGLE BAĞLANTILARI ---
 def get_gspread_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
         return gspread.authorize(creds)
-    except Exception as e: return None
+    except: return None
 
-# --- GEMINI MODEL LİSTESİ ---
+def get_drive_service():
+    """Drive API servisini başlatır (Finans modülü için gerekli)."""
+    scope = ['https://www.googleapis.com/auth/drive']
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Drive Bağlantı Hatası: {e}")
+        return None
+
+def find_folder_id(service, folder_name, parent_id=None):
+    """Klasör ID bulur."""
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        if parent_id: query += f" and '{parent_id}' in parents"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        if files: return files[0]['id']
+        return None # Bulamazsa None döner (Oluşturmaya zorlamıyoruz artık)
+    except: return None
+
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
     try:
@@ -61,7 +76,6 @@ def fetch_google_models():
 
 # --- YARDIMCI ARAÇLAR ---
 def clean_number(num_str):
-    """Türkçe formatlı sayıları (1.500 -> 1500.0) düzeltir."""
     if not num_str: return 0.0
     clean = re.sub(r'[^\d.,-]', '', str(num_str))
     try:
@@ -101,7 +115,7 @@ def get_or_create_worksheet(sh, title, cols, header):
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
-# --- DOSYA YÖNLENDİRMELİ FONKSİYONLAR ---
+# --- DOSYA YÖNLENDİRMELERİ ---
 def resolve_company_name(ocr_name, client, known_companies=None):
     std_name = standardize_name(ocr_name)
     try:

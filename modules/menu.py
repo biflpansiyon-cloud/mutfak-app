@@ -17,29 +17,38 @@ SABIT_KAHVALTI = "Peynir, Zeytin, Reçel, Bal, Tereyağı, Domates, Salatalık"
 
 def get_full_menu_pool(client):
     """
-    Google Sheets'ten yemek havuzunu çeker (ID Yöntemi + Kimlik Kontrolü).
+    Google Sheets'ten yemek havuzunu çeker.
+    Hata durumunda secrets dosyasındaki maili ifşa eder.
     """
-    # Dosyanın "Parmak İzi" (ID'si) - Senin ekran görüntüsünden aldım
-    SHEET_ID = "1FyxQ6Vue3sp16uxD8r-1hBiICED5dkpgXQlEM_q1rll"
+    # 1. Dosya URL'si (Ekran görüntüsünden aldığımız)
+    sheet_url = "https://docs.google.com/spreadsheets/d/1FyxQ6Vue3sp16uxD8r-1hBiICED5dkpgXQlEM_q1rll/edit"
     
+    # 2. Mail Adresini Direkt Secrets Dosyasından Okuyalım (Kaçarı yok)
     try:
-        # URL yerine direkt ID ile açıyoruz (Daha güvenli)
-        sh = client.open_by_key(SHEET_ID)
+        # Secrets yapısına göre değişebilir ama genelde bu şekildedir
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        robot_email = creds_dict.get("client_email", "Mail adresi secrets içinde bulunamadı!")
+    except:
+        robot_email = "Secrets dosyası okunamadı!"
+
+    try:
+        # Bağlanmayı dene
+        sh = client.open_by_url(sheet_url)
         ws = sh.worksheet(MENU_POOL_SHEET_NAME)
         
         data = ws.get_all_values()
         
-        if not data: return []
+        if not data: 
+            st.error("Dosyaya bağlandım ama içi boş!")
+            return []
         
+        # --- Veri İşleme Kısmı ---
         header = [h.strip().upper() for h in data[0]]
         pool = []
-        
         for row in data[1:]:
             item = {}
             while len(row) < len(header): row.append("")
-            for i, col_name in enumerate(header): 
-                item[col_name] = row[i].strip()
-            
+            for i, col_name in enumerate(header): item[col_name] = row[i].strip()
             try: item['LIMIT'] = int(item['LIMIT']) if item.get('LIMIT') else 99
             except: item['LIMIT'] = 99
             try: item['ARA'] = int(item['ARA']) if item.get('ARA') else 0
@@ -49,16 +58,15 @@ def get_full_menu_pool(client):
         return pool
         
     except Exception as e:
-        # HATA OLURSA ROBOTUN KİMLİĞİNİ EKRANA BASALIM
-        try:
-            robot_email = client.auth.service_account_email
-        except:
-            robot_email = "Bilinmiyor (Secrets dosyasını kontrol et)"
-            
-        st.error(f"🚨 ERİŞİM HATASI! Dosyayı şu adrese paylaştığından emin misin?")
-        st.code(robot_email, language="text") # Robotun mailini kopyalaman için ekrana basar
-        st.error(f"Teknik Hata Detayı: {e}")
+        # HATA EKRANI
+        st.error("🚨 ERİŞİM HATASI DETAYLARI")
+        st.write("Kodun şu an kullanmaya çalıştığı Robot Maili:")
+        st.code(robot_email, language="text") # Maili kopyalanabilir şekilde gösterir
+        
+        st.warning("Lütfen yukarıdaki mail adresini kopyalayıp Google Sheets'teki 'Paylaş' kısmıyla harfiyen kıyasla.")
+        st.error(f"Teknik Hata: {e}")
         return []
+
 
 def select_dish(pool, category, usage_history, current_day_obj, constraints=None):
     """

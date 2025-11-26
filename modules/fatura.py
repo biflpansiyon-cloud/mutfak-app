@@ -6,9 +6,6 @@ import pandas as pd
 from datetime import datetime
 from .utils import *
 
-# --- BUG BUSTER FOR SHEET NAMES --- #
-SHEET_NAME = "Mutfak_Takip"
-PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 
 def analyze_invoice_pdf(uploaded_file, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]

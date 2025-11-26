@@ -153,20 +153,18 @@ def save_receipt_dataframe(df, original_image):
         
         # --- 1. VERİ İŞLEME VE STOK GÜNCELLEME ---
         for index, row in df.iterrows():
-            ocr_raw_name = str(row["TEDARİKÇİ"])
-            final_firma = resolve_company_name(ocr_raw_name, client, known_companies)
-            
-            tarih = str(row["TARİH"])
-            urun = str(row["ÜRÜN ADI"])
-            miktar = str(row["MİKTAR"])
-            birim = str(row["BİRİM"]).upper()
-            fiyat = str(row["BİRİM FİYAT"])
-            tutar = str(row["TOPLAM TUTAR"])
-            
-            f_val = clean_number(fiyat)
-            m_val = clean_number(miktar)
-            final_urun = resolve_product_name(urun, client)
-            
+        ocr_raw_name = str(row["TEDARİKÇİ"])
+        final_firma = resolve_company_name(ocr_raw_name, client, known_companies) # Standart İsim
+        
+        # BELGE TARİHİNİ KULLAN
+        tarih = str(row["TARİH"]) 
+        
+        urun = str(row["ÜRÜN ADI"])
+        miktar = str(row["MİKTAR"])
+        birim = str(row["BİRİM"]).upper()
+        fiyat = str(row["BİRİM FİYAT"])
+        tutar = str(row["TOPLAM TUTAR"])
+        
             # Fiyat Veritabanından Çekme ve Stok Düşme
             if final_firma in price_db:
                 prods = list(price_db[final_firma].keys())
@@ -194,8 +192,8 @@ def save_receipt_dataframe(df, original_image):
                     kota_updates.append({'range': f'F{row_num}', 'values': [[new_kota]]})
             
             # Firmaya göre grupla
-            if final_firma not in firm_data: firm_data[final_firma] = []
-            firm_data[final_firma].append([tarih, final_urun, miktar, birim, fiyat, "TL", tutar])
+        if final_firma not in firm_data: firm_data[final_firma] = []
+        firm_data[final_firma].append([tarih, final_urun, miktar, birim, fiyat, "TL", tutar])
             
         # --- 2. SHEETS'E YAZMA ---
         msg = []
@@ -216,69 +214,66 @@ def save_receipt_dataframe(df, original_image):
             price_ws.batch_update(kota_updates)
             msg.append(f"(Stok Güncellendi)")
             
-        # --- 4. DRIVE'A RESİM YÜKLEME ---
-        if original_image:
-            # Dosya adı oluştur: Firma_Tarih_Rastgele.jpg
-            first_firma = list(firm_data.keys())[0] if firm_data else "Genel"
-            first_date = str(df.iloc[0]["TARİH"]).replace(".", "-") if not df.empty else datetime.now().strftime("%Y-%m-%d")
-            file_name = f"{first_firma}_{first_date}_irsaliye.jpg"
-            
-            drive_success = upload_to_drive(original_image, file_name)
-            if drive_success: msg.append("✅ Resim Drive'a Yüklendi")
-            
-        return True, " | ".join(msg)
-            
-    except Exception as e: return False, str(e)
+# --- 4. DRIVE'A RESİM YÜKLEME ---
+    if original_image:
+        first_firma = list(firm_data.keys())[0] if firm_data else "Genel"
+        
+        # Kaydedilen belge tarihini kullan (GG.AA.YYYY formatı için replace)
+        first_date = str(df.iloc[0]["TARİH"]).replace(".", "-") if not df.empty else datetime.now().strftime("%Y-%m-%d")
+        
+        file_name = f"{first_firma}_{first_date}_irsaliye.jpg"
+        
+        # Klasör oluşturma mantığı artık utils'de olduğu için burası çalışacak.
+        drive_success = upload_to_drive(original_image, file_name, mime_type="image/jpeg") 
+        if drive_success: msg.append("✅ Resim Drive'a Yüklendi")
+    
+    return True, " | ".join(msg)
+
 
 def render_page(sel_model):
-    st.header("📝 İrsaliye ve Fatura Girişi")
+    st.header("📝 İrsaliye Girişi")
     st.markdown("---")
     
-    col1, col2 = st.columns([1, 2])
+    # TEK SÜTUN OLARAK GERİ ALINDI
+    f = st.file_uploader("İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
     
-    with col1:
-        f = st.file_uploader("Fatura/İrsaliye Fotoğrafı Yükle", type=['jpg', 'png', 'jpeg'])
-        if f:
-            img = Image.open(f)
-            st.image(img, caption="Yüklenen Belge", use_container_width=True)
-            
-            if st.button("🔍 Belgeyi Analiz Et", type="primary"):
-                with st.spinner("Yapay Zeka belgeyi okuyor..."):
-                    s, raw_text = analyze_receipt_image(img, sel_model)
-                    if s:
-                        df = text_to_dataframe(raw_text)
-                        st.session_state['irsaliye_df'] = df
-                        st.session_state['current_image'] = img # Resmi kaydetmek için sakla
-                    else:
-                        st.error(f"Okuma Hatası: {raw_text}")
+    if f:
+        img = Image.open(f)
+        st.image(img, caption="Yüklenen Belge", width=300)
+        
+        if st.button("🔍 Belgeyi Analiz Et", type="primary"):
+            with st.spinner("Okunuyor..."):
+                s, raw_text = analyze_receipt_image(img, sel_model)
+                if s:
+                    df = text_to_dataframe(raw_text)
+                    st.session_state['irsaliye_df'] = df
+                    st.session_state['current_image'] = img
+                else:
+                    st.error(f"Okuma Hatası: {raw_text}")
 
-    with col2:
-        if 'irsaliye_df' in st.session_state:
-            st.info("👇 Tabloyu kontrol edin. Ürün isimleri ve miktarlar doğru mu?")
-            
-            # Data Editor
-            edited_df = st.data_editor(
-                st.session_state['irsaliye_df'],
-                num_rows="dynamic",
-                use_container_width=True,
-                height=400
-            )
-            
-            st.markdown("---")
-            col_save, col_cancel = st.columns([1, 4])
-            
-            with col_save:
-                if st.button("💾 Kaydet ve İşle", type="primary"):
-                    with st.spinner("Veriler işleniyor..."):
-                        img_to_save = st.session_state.get('current_image', None)
-                        success, msg = save_receipt_dataframe(edited_df, img_to_save)
-                        
-                        if success:
-                            st.balloons()
-                            st.success(f"Başarılı! {msg}")
-                            # Temizlik
-                            if 'irsaliye_df' in st.session_state: del st.session_state['irsaliye_df']
-                            if 'current_image' in st.session_state: del st.session_state['current_image']
-                            st.rerun()
-                        else:
-                            st.error(f"Kayıt Hatası: {msg}")
+   # EDİTÖR EKRANI
+    if 'irsaliye_df' in st.session_state:
+        st.subheader("İşlenecek Veri Tablosu")
+        st.info("👇 Tabloyu incele, hataları düzelt. Firma ve ürün isimleri otomatik standartlaştırılacaktır.")
+        
+        edited_df = st.data_editor(
+            st.session_state['irsaliye_df'],
+            num_rows="dynamic",
+            use_container_width=True
+        )
+        
+        st.markdown("---")
+        
+        if st.button("💾 Kaydet ve İşle (Stoktan Düş)", type="primary"):
+            with st.spinner("Kaydediliyor..."):
+                img_to_save = st.session_state.get('current_image', None)
+                success, msg = save_receipt_dataframe(edited_df, img_to_save)
+                
+                if success:
+                    st.balloons()
+                    st.success(msg)
+                    del st.session_state['irsaliye_df']
+                    del st.session_state['current_image']
+                    st.rerun()
+                else:
+                    st.error(f"Kayıt Hatası: {msg}")

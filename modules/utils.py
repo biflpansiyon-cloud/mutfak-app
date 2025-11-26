@@ -7,29 +7,26 @@ import difflib
 import requests
 
 # =========================================================
-# 📂 DOSYA İSİMLERİ (EKRAN GÖRÜNTÜSÜNE GÖRE SABİTLENDİ)
+# 📂 DOSYA İSİMLERİ ( SENİN DRİVE YAPINA GÖRE )
 # =========================================================
 
-FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura ve İrsaliyeler burada
-FILE_FINANS = "Mutfak_Ogrenci_Finans"    # Öğrenci ödemeleri burada
-FILE_MENU = "Mutfak_Menu_Planlama"       # Yemek havuzu burada
+FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura/İrsaliye
+FILE_FINANS = "Mutfak_Ogrenci_Finans"    # Öğrenci İşleri
+FILE_MENU = "Mutfak_Menu_Planlama"       # Yemek Menüsü
 
 # =========================================================
-# 📑 SAYFA (TAB) İSİMLERİ
+# 📑 SAYFA İSİMLERİ
 # =========================================================
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
 SHEET_FINANS_AYARLAR = "FINANS_AYARLAR"
 
-# Firma listesini ve Fiyat Anahtarını 'Mutfak_Stok_SatinAlma' içinde arayacağız
-SHEET_STOK_AYARLAR = "AYARLAR" # Firma listesi burada (A Sütunu)
+SHEET_STOK_AYARLAR = "AYARLAR" 
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
-
-# Menü Havuzu 'Mutfak_Menu_Planlama' içinde
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
 # =========================================================
-# 🔐 GÜVENLİK VE BAĞLANTILAR
+# 🔐 BAĞLANTILAR
 # =========================================================
 
 def check_password():
@@ -47,6 +44,7 @@ def check_password():
 
 def get_gspread_client():
     try:
+        # KAPSAM (SCOPE) AYARI - Robotun yetki alanı
         scope = [
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
@@ -58,23 +56,12 @@ def get_gspread_client():
         return None
 
 def get_drive_service():
-    """Drive servisi (Sadece Finans modülü için gerekli)"""
     scope = ['https://www.googleapis.com/auth/drive']
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return build('drive', 'v3', credentials=creds)
     except Exception as e: return None
-
-def find_folder_id(service, folder_name, parent_id=None):
-    try:
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-        if parent_id: query += f" and '{parent_id}' in parents"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        if files: return files[0]['id']
-        return None
-    except: return None
 
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -86,62 +73,6 @@ def fetch_google_models():
             return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
         return []
     except: return []
-
-# =========================================================
-# 🏢 FİRMA VE STOK İŞLEMLERİ (FILE_STOK Dosyasında Çalışır)
-# =========================================================
-
-def get_company_list(client):
-    """
-    Mutfak_Stok_SatinAlma dosyasındaki AYARLAR sayfasından firma listesini çeker.
-    """
-    try:
-        sh = client.open(FILE_STOK) # Mutfak_Stok_SatinAlma açılır
-        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
-        except: 
-            # Sayfa yoksa oluşturur
-            ws = sh.add_worksheet(SHEET_STOK_AYARLAR, 100, 2)
-            ws.update_cell(1, 1, "FİRMA LİSTESİ")
-            return []
-            
-        col_values = ws.col_values(1)
-        # Başlığı ve boşları at
-        companies = [c.strip() for c in col_values[1:] if c.strip()]
-        return sorted(list(set(companies)))
-    except: return []
-
-def resolve_product_name(ocr_prod, client, company_name):
-    clean_prod = ocr_prod.replace("*", "").strip()
-    try:
-        price_db = get_price_database(client)
-        if company_name in price_db:
-            company_products = list(price_db[company_name].keys())
-            best = find_best_match(clean_prod, company_products, cutoff=0.7)
-            if best: return best
-        return clean_prod
-    except: return clean_prod
-
-def get_price_database(client):
-    price_db = {}
-    try:
-        sh = client.open(FILE_STOK) # Mutfak_Stok_SatinAlma açılır
-        
-        # FIYAT_ANAHTARI yoksa hata vermesin, oluştursun
-        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
-        
-        data = ws.get_all_values()
-        for idx, row in enumerate(data):
-            if idx == 0: continue
-            if len(row) >= 3:
-                ted = row[0].strip()
-                urn = row[1].strip()
-                fyt = clean_number(row[2])
-                kota = clean_number(row[5]) if len(row) >= 6 else 0.0
-                kb = row[6].strip() if len(row) >= 7 else ""
-                if ted not in price_db: price_db[ted] = {}
-                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
-        return price_db
-    except: return {}
 
 # =========================================================
 # 🛠️ YARDIMCI ARAÇLAR
@@ -186,3 +117,50 @@ def get_or_create_worksheet(sh, title, cols, header):
     except Exception as e:
         if "already exists" in str(e): return sh.worksheet(title)
         return None
+
+# =========================================================
+# 🏢 FİRMA VE STOK İŞLEMLERİ (FILE_STOK Dosyasında)
+# =========================================================
+
+def get_company_list(client):
+    try:
+        sh = client.open(FILE_STOK)
+        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
+        except: 
+            ws = sh.add_worksheet(SHEET_STOK_AYARLAR, 100, 2)
+            ws.update_cell(1, 1, "FİRMA LİSTESİ")
+            return []
+        col_values = ws.col_values(1)
+        companies = [c.strip() for c in col_values[1:] if c.strip()]
+        return sorted(list(set(companies)))
+    except: return []
+
+def resolve_product_name(ocr_prod, client, company_name):
+    clean_prod = ocr_prod.replace("*", "").strip()
+    try:
+        price_db = get_price_database(client)
+        if company_name in price_db:
+            company_products = list(price_db[company_name].keys())
+            best = find_best_match(clean_prod, company_products, cutoff=0.7)
+            if best: return best
+        return clean_prod
+    except: return clean_prod
+
+def get_price_database(client):
+    price_db = {}
+    try:
+        sh = client.open(FILE_STOK)
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
+        data = ws.get_all_values()
+        for idx, row in enumerate(data):
+            if idx == 0: continue
+            if len(row) >= 3:
+                ted = row[0].strip()
+                urn = row[1].strip()
+                fyt = clean_number(row[2])
+                kota = clean_number(row[5]) if len(row) >= 6 else 0.0
+                kb = row[6].strip() if len(row) >= 7 else ""
+                if ted not in price_db: price_db[ted] = {}
+                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
+        return price_db
+    except: return {}

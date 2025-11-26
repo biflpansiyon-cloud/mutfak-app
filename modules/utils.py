@@ -210,3 +210,39 @@ def get_price_database(client):
                 price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
         return price_db
     except: return {}
+
+# 26 kasım 2025 modules/utils.py içine bu fonksiyonları ekleyin/değiştirin
+# ... (Diğer importlar ve fonksiyonlar aynen kalmalı) ...
+
+# --- GOOGLE BAĞLANTILARI (DRIVE) ---
+# ... (get_drive_service fonksiyonu aynen kalsın) ...
+
+def find_folder_id(service, folder_name, parent_id=None):
+    """İsmi verilen klasörün ID'sini bulur. Yoksa oluşturur."""
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        if parent_id:
+            query += f" and '{parent_id}' in parents"
+        
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        
+        if files:
+            # Klasör bulundu
+            return files[0]['id']
+        
+        # Klasör bulunamazsa: OLUŞTUR
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        if parent_id:
+            file_metadata['parents'] = [parent_id]
+            
+        file = service.files().create(body=file_metadata, fields='id').execute()
+        st.success(f"📂 Drive klasörü '{folder_name}' otomatik oluşturuldu.")
+        return file.get('id')
+        
+    except Exception as e:
+        st.error(f"Klasör işlem hatası ({folder_name}): {e}")
+        return None

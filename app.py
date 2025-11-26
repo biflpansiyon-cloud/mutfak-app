@@ -2,6 +2,7 @@ import streamlit as st
 import sys
 import os
 import pandas as pd # Dashboard grafikleri için
+from modules.utils import check_password, fetch_google_models, FILE_FINANS, SHEET_YATILI # FILE_FINANS eklendi
 
 # Yolu ekle
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -66,8 +67,14 @@ if page == "🏠 Ana Sayfa":
     # Dashboard Verilerini Çek
     col1, col2, col3 = st.columns(3)
     
-    # Finans verilerini çekmek için Finans modülündeki fonksiyonu kullanıyoruz
-    df_yatili = finans.get_data(SHEET_YATILI)
+    # Finans verilerini çekmek için:
+    try:
+        client = modules.utils.get_gspread_client() # Client al
+        sh = client.open(FILE_FINANS) # Finans dosyasını aç
+        ws = sh.worksheet(SHEET_YATILI)
+        df_yatili = pd.DataFrame(ws.get_all_records())
+    except:
+        df_yatili = pd.DataFrame()
     
     toplam_beklenti = 0
     toplam_tahsilat = 0

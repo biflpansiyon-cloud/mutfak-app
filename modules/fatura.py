@@ -58,13 +58,21 @@ def text_to_dataframe_fatura(raw_text):
     data = []
     lines = raw_text.split('\n')
     for line in lines:
+        # Markdown tablolarındaki gereksiz satırları atla
+        if "---" in line or line.strip() == "": continue
+        
         line = line.replace("*", "").strip()
         if "|" in line:
-            parts = [p.strip() for p in line.split('|')]
-            # Başlık satırını atla
-            if "TEDARİKÇİ" in parts[0].upper(): continue
+            # Boşlukları temizle ve sadece dolu olan hücreleri al
+            parts = [p.strip() for p in line.split('|') if p.strip() != ""]
             
-            # Eksik sütun tamamlama
+            # Başlık satırını atla (Büyük/küçük harf duyarlılığını kaldırarak kontrol et)
+            if len(parts) > 0 and "TEDARİKÇİ" in parts[0].upper(): continue
+            
+            # Eğer satırda yeterli veri yoksa atla veya '0' ile doldur
+            if len(parts) < 2: continue # Çok kısa satırsa hatalıdır
+            
+            # Eksik sütun tamamlama (En az 5 sütun olmalı)
             while len(parts) < 5: parts.append("0")
             
             data.append({

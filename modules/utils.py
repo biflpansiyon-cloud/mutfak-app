@@ -88,16 +88,38 @@ def fetch_google_models():
 
 # --- YARDIMCI ARAÇLAR ---
 def clean_number(num_str):
+    """
+    Türkçe formatlı sayıları (1.500,50 veya 1.500) bilgisayar formatına (1500.50) çevirir.
+    Hata: 1.500'ü 1.5 algılamaması için nokta silinir, virgül nokta yapılır.
+    """
+    if not num_str: return 0.0
+    
+    # Temizle: Sadece rakam, nokta, virgül ve eksi kalsın
+    clean = re.sub(r'[^\d.,-]', '', str(num_str))
+    
     try:
-        clean = re.sub(r'[^\d.,-]', '', str(num_str))
-        if not clean: return 0.0
-        if clean.count('.') > 1 or clean.count(',') > 1: clean = clean.replace('.', '').replace(',', '.')
-        elif ',' in clean and '.' not in clean: clean = clean.replace(',', '.')
-        elif ',' in clean and '.' in clean:
-             if clean.find(',') < clean.find('.'): clean = clean.replace(',', '')
-             else: clean = clean.replace('.', '').replace(',', '.')
+        # Senaryo 1: Hem nokta hem virgül var (Örn: 1.500,50) -> Noktayı at, virgülü nokta yap
+        if '.' in clean and ',' in clean:
+            clean = clean.replace('.', '').replace(',', '.')
+            
+        # Senaryo 2: Sadece virgül var (Örn: 150,50) -> Virgülü nokta yap
+        elif ',' in clean and '.' not in clean:
+            clean = clean.replace(',', '.')
+            
+        # Senaryo 3: Sadece nokta var (Örn: 1.500 veya 1.5)
+        elif '.' in clean and ',' not in clean:
+            # Eğer noktadan sonra 3 hane varsa ve nokta tekse, bu binliktir (Türkiye standardı)
+            # Örn: 1.500 -> 1500 olur. 
+            parts = clean.split('.')
+            if len(parts) == 2 and len(parts[1]) == 3:
+                clean = clean.replace('.', '') 
+            else:
+                # Diğer durumlarda (1.5 kg gibi) nokta ondalıktır, dokunma.
+                pass 
+
         return float(clean)
-    except: return 0.0
+    except:
+        return 0.0
 
 def turkish_lower(text):
     if not text: return ""

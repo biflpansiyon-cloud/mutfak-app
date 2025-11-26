@@ -3,11 +3,15 @@ import pandas as pd
 from datetime import datetime
 import random
 import io
-from .utils import *
+from .utils import (
+    get_gspread_client, 
+    FILE_MENU, # Yeni Dosya
+    MENU_POOL_SHEET_NAME
+)
 
 def get_full_menu_pool(client):
     try:
-        sh = client.open(SHEET_NAME)
+        sh = client.open(FILE_MENU) # Değişiklik burada
         ws = sh.worksheet(MENU_POOL_SHEET_NAME)
         data = ws.get_all_values()
         if not data: return []
@@ -17,14 +21,14 @@ def get_full_menu_pool(client):
             item = {}
             while len(row) < len(header): row.append("")
             for i, col_name in enumerate(header): item[col_name] = row[i].strip()
-            try: item['LIMIT'] = int(item['LIMIT']) if item['LIMIT'] else 99
-            except: item['LIMIT'] = 99
-            try: item['ARA'] = int(item['ARA']) if item['ARA'] else 0
-            except: item['ARA'] = 0
+            item['LIMIT'] = int(item['LIMIT']) if item.get('LIMIT') else 99
+            item['ARA'] = int(item['ARA']) if item.get('ARA') else 0
             pool.append(item)
         return pool
     except: return []
 
+# ... (generate_smart_menu ve render_page fonksiyonları tamamen aynı kalacak) ...
+# Çünkü sadece veriyi çektiğimiz kaynağı değiştirdik.
 def generate_smart_menu(month_index, year, pool, holidays, ready_snack_days):
     start_date = datetime(year, month_index, 1)
     if month_index == 12: next_month = datetime(year + 1, 1, 1)

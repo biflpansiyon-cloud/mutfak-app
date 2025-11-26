@@ -1,21 +1,20 @@
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from googleapiclient.discovery import build
 import re
 import difflib
 import requests
 
-# --- YENİ VERİTABANI İSİMLERİ ---
+# --- DOSYA İSİMLERİ ---
 FILE_STOK = "Mutfak_Stok_SatinAlma"
 FILE_FINANS = "Mutfak_Ogrenci_Finans"
 FILE_MENU = "Mutfak_Menu_Planlama"
 
-# --- SAYFA (TAB) İSİMLERİ ---
+# --- SAYFA İSİMLERİ ---
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
-SHEET_FINANS_AYARLAR = "FINANS_AYARLAR" # Birim Fiyat burada
-SHEET_STOK_AYARLAR = "AYARLAR"          # Firma Aliasları (Takma adlar) burada
+SHEET_FINANS_AYARLAR = "FINANS_AYARLAR"
+SHEET_STOK_AYARLAR = "AYARLAR"
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
@@ -40,7 +39,7 @@ def check_password():
             st.error("Yanlış şifre.")
     return False
 
-# --- BAĞLANTILAR ---
+# --- SHEETS BAĞLANTISI ---
 def get_gspread_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -48,33 +47,7 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except Exception as e: return None
 
-def get_drive_service():
-    scope = ['https://www.googleapis.com/auth/drive']
-    try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Drive Bağlantı Hatası: {e}")
-        return None
-
-def find_folder_id(service, folder_name, parent_id=None):
-    try:
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-        if parent_id:
-            query += f" and '{parent_id}' in parents"
-        
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        
-        if files: return files[0]['id']
-        
-        meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-        if parent_id: meta['parents'] = [parent_id]
-        file = service.files().create(body=meta, fields='id').execute()
-        return file.get('id')
-    except: return None
-
+# --- GEMINI MODEL LİSTESİ ---
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
     try:
@@ -88,38 +61,17 @@ def fetch_google_models():
 
 # --- YARDIMCI ARAÇLAR ---
 def clean_number(num_str):
-    """
-    Türkçe formatlı sayıları (1.500,50 veya 1.500) bilgisayar formatına (1500.50) çevirir.
-    Hata: 1.500'ü 1.5 algılamaması için nokta silinir, virgül nokta yapılır.
-    """
+    """Türkçe formatlı sayıları (1.500 -> 1500.0) düzeltir."""
     if not num_str: return 0.0
-    
-    # Temizle: Sadece rakam, nokta, virgül ve eksi kalsın
     clean = re.sub(r'[^\d.,-]', '', str(num_str))
-    
     try:
-        # Senaryo 1: Hem nokta hem virgül var (Örn: 1.500,50) -> Noktayı at, virgülü nokta yap
-        if '.' in clean and ',' in clean:
-            clean = clean.replace('.', '').replace(',', '.')
-            
-        # Senaryo 2: Sadece virgül var (Örn: 150,50) -> Virgülü nokta yap
-        elif ',' in clean and '.' not in clean:
-            clean = clean.replace(',', '.')
-            
-        # Senaryo 3: Sadece nokta var (Örn: 1.500 veya 1.5)
+        if '.' in clean and ',' in clean: clean = clean.replace('.', '').replace(',', '.')
+        elif ',' in clean and '.' not in clean: clean = clean.replace(',', '.')
         elif '.' in clean and ',' not in clean:
-            # Eğer noktadan sonra 3 hane varsa ve nokta tekse, bu binliktir (Türkiye standardı)
-            # Örn: 1.500 -> 1500 olur. 
             parts = clean.split('.')
-            if len(parts) == 2 and len(parts[1]) == 3:
-                clean = clean.replace('.', '') 
-            else:
-                # Diğer durumlarda (1.5 kg gibi) nokta ondalıktır, dokunma.
-                pass 
-
+            if len(parts) == 2 and len(parts[1]) == 3: clean = clean.replace('.', '') 
         return float(clean)
-    except:
-        return 0.0
+    except: return 0.0
 
 def turkish_lower(text):
     if not text: return ""
@@ -149,10 +101,8 @@ def get_or_create_worksheet(sh, title, cols, header):
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
-# --- ÖZEL İŞLEVLER (DOSYA YÖNLENDİRMELİ) ---
-
+# --- DOSYA YÖNLENDİRMELİ FONKSİYONLAR ---
 def resolve_company_name(ocr_name, client, known_companies=None):
-    # Bu fonksiyon STOK dosyasına bakar
     std_name = standardize_name(ocr_name)
     try:
         sh = client.open(FILE_STOK)
@@ -162,19 +112,16 @@ def resolve_company_name(ocr_name, client, known_companies=None):
             alias_map = {}
             for row in data[1:]:
                 if len(row) >= 2: alias_map[turkish_lower(row[0]).strip()] = row[1].strip()
-            
             key = turkish_lower(std_name)
             if key in alias_map: return alias_map[key]
         except: pass
     except: pass
-    
     if known_companies:
         best_db = find_best_match(std_name, known_companies, cutoff=0.6)
         if best_db: return best_db
     return std_name
 
 def resolve_product_name(ocr_prod, client):
-    # Bu fonksiyon STOK dosyasına bakar
     clean_prod = ocr_prod.replace("*", "").strip()
     try:
         sh = client.open(FILE_STOK)
@@ -193,7 +140,6 @@ def resolve_product_name(ocr_prod, client):
     except: return clean_prod
 
 def get_price_database(client):
-    # Bu fonksiyon STOK dosyasından çeker
     price_db = {}
     try:
         sh = client.open(FILE_STOK)

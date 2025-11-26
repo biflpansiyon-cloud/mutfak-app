@@ -6,17 +6,21 @@ import re
 import difflib
 import requests
 
-# --- SABİTLER ---
-SHEET_NAME = "Mutfak_Takip"
+# --- YENİ VERİTABANI İSİMLERİ ---
+FILE_STOK = "Mutfak_Stok_SatinAlma"
+FILE_FINANS = "Mutfak_Ogrenci_Finans"
+FILE_MENU = "Mutfak_Menu_Planlama"
+
+# --- SAYFA (TAB) İSİMLERİ ---
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
-SHEET_SETTINGS = "FINANS_AYARLAR"  # Standart isim bu
+SHEET_FINANS_AYARLAR = "FINANS_AYARLAR" # Birim Fiyat burada
+SHEET_STOK_AYARLAR = "AYARLAR"          # Firma Aliasları (Takma adlar) burada
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 
 # --- GÜVENLİK ---
 def check_password():
-    """Session State tabanlı şifre kontrolü."""
     if st.session_state.get("authenticated", False):
         return True
     
@@ -36,7 +40,7 @@ def check_password():
             st.error("Yanlış şifre.")
     return False
 
-# --- BAĞLANTILAR (SHEETS & DRIVE) ---
+# --- BAĞLANTILAR ---
 def get_gspread_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -55,7 +59,6 @@ def get_drive_service():
         return None
 
 def find_folder_id(service, folder_name, parent_id=None):
-    """Klasör ID bulur, yoksa oluşturur."""
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
         if parent_id:
@@ -66,14 +69,11 @@ def find_folder_id(service, folder_name, parent_id=None):
         
         if files: return files[0]['id']
         
-        # Yoksa oluştur
         meta = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
         if parent_id: meta['parents'] = [parent_id]
-        
         file = service.files().create(body=meta, fields='id').execute()
         return file.get('id')
-    except Exception as e:
-        return None
+    except: return None
 
 def fetch_google_models():
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -86,7 +86,7 @@ def fetch_google_models():
         return []
     except: return []
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- YARDIMCI ARAÇLAR ---
 def clean_number(num_str):
     try:
         clean = re.sub(r'[^\d.,-]', '', str(num_str))
@@ -127,14 +127,15 @@ def get_or_create_worksheet(sh, title, cols, header):
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
-# --- İSİM ÇÖZÜCÜLER (Hata Düzeltildi) ---
+# --- ÖZEL İŞLEVLER (DOSYA YÖNLENDİRMELİ) ---
+
 def resolve_company_name(ocr_name, client, known_companies=None):
+    # Bu fonksiyon STOK dosyasına bakar
     std_name = standardize_name(ocr_name)
     try:
-        sh = client.open(SHEET_NAME)
+        sh = client.open(FILE_STOK)
         try:
-            # DÜZELTME: Artık doğru sabit değişkeni kullanıyoruz
-            ws = sh.worksheet(SHEET_SETTINGS) 
+            ws = sh.worksheet(SHEET_STOK_AYARLAR) 
             data = ws.get_all_values()
             alias_map = {}
             for row in data[1:]:
@@ -142,10 +143,6 @@ def resolve_company_name(ocr_name, client, known_companies=None):
             
             key = turkish_lower(std_name)
             if key in alias_map: return alias_map[key]
-            for k, v in alias_map.items():
-                if k in key: return v
-            best = find_best_match(std_name, list(alias_map.keys()), cutoff=0.7)
-            if best: return alias_map[turkish_lower(best)]
         except: pass
     except: pass
     
@@ -155,10 +152,11 @@ def resolve_company_name(ocr_name, client, known_companies=None):
     return std_name
 
 def resolve_product_name(ocr_prod, client):
+    # Bu fonksiyon STOK dosyasına bakar
     clean_prod = ocr_prod.replace("*", "").strip()
     try:
-        sh = client.open(SHEET_NAME)
-        try: ws = sh.worksheet(SHEET_SETTINGS) # Düzeltildi
+        sh = client.open(FILE_STOK)
+        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
         except: return clean_prod
         data = ws.get_all_values()
         product_map = {}
@@ -167,18 +165,16 @@ def resolve_product_name(ocr_prod, client):
                 if row[2] and row[3]: product_map[turkish_lower(row[2])] = row[3].strip()
         key = turkish_lower(clean_prod)
         if key in product_map: return product_map[key]
-        for k, v in product_map.items():
-            if k in key: return v
         best = find_best_match(clean_prod, list(product_map.keys()), cutoff=0.85)
         if best: return product_map[turkish_lower(best)]
         return clean_prod
     except: return clean_prod
 
-# --- VERİTABANI ÇEKİCİ ---
 def get_price_database(client):
+    # Bu fonksiyon STOK dosyasından çeker
     price_db = {}
     try:
-        sh = client.open(SHEET_NAME)
+        sh = client.open(FILE_STOK)
         ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
         data = ws.get_all_values()
         for idx, row in enumerate(data):

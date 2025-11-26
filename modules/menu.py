@@ -17,49 +17,47 @@ SABIT_KAHVALTI = "Peynir, Zeytin, Reçel, Bal, Tereyağı, Domates, Salatalık"
 
 def get_full_menu_pool(client):
     """
-    Google Sheets'ten yemek havuzunu çeker.
+    Google Sheets'ten yemek havuzunu çeker (ID Yöntemi + Kimlik Kontrolü).
     """
+    # Dosyanın "Parmak İzi" (ID'si) - Senin ekran görüntüsünden aldım
+    SHEET_ID = "1FyxQ6Vue3sp16uxD8r-1hBiICED5dkpgXQlEM_q1rll"
+    
     try:
-        # --- DEĞİŞİKLİK BURADA ---
-        # Dosyayı ismiyle değil, direkt URL'si ile açıyoruz.
-        # Bu sayede robotun yanlış dosyaya gitme ihtimali %0 oluyor.
-        sheet_url = "https://docs.google.com/spreadsheets/d/1FyxQ6Vue3sp16uxD8r-1hBiICED5dkpgXQlEM_q1rll/edit"
-        
-        sh = client.open_by_url(sheet_url)
+        # URL yerine direkt ID ile açıyoruz (Daha güvenli)
+        sh = client.open_by_key(SHEET_ID)
         ws = sh.worksheet(MENU_POOL_SHEET_NAME)
         
         data = ws.get_all_values()
         
-        # DEBUG: Ekrana bilgi yazalım (Çalışınca kaldırırsın)
-        if not data:
-            st.error("Dosya bulundu ama içi boş görünüyor!")
-            return []
+        if not data: return []
         
-        # Başlıkları al (1. Satır)
         header = [h.strip().upper() for h in data[0]]
         pool = []
         
-        # Veri satırlarını işle (2. Satırdan başla)
         for row in data[1:]:
             item = {}
-            # Satırı başlıklarla eşleştir
             while len(row) < len(header): row.append("")
             for i, col_name in enumerate(header): 
                 item[col_name] = row[i].strip()
             
-            # Sayısal Değerleri Temizle
             try: item['LIMIT'] = int(item['LIMIT']) if item.get('LIMIT') else 99
             except: item['LIMIT'] = 99
-            
             try: item['ARA'] = int(item['ARA']) if item.get('ARA') else 0
             except: item['ARA'] = 0
-            
             pool.append(item)
             
         return pool
         
     except Exception as e:
-        st.error(f"DETAYLI HATA RAPORU: {e}")
+        # HATA OLURSA ROBOTUN KİMLİĞİNİ EKRANA BASALIM
+        try:
+            robot_email = client.auth.service_account_email
+        except:
+            robot_email = "Bilinmiyor (Secrets dosyasını kontrol et)"
+            
+        st.error(f"🚨 ERİŞİM HATASI! Dosyayı şu adrese paylaştığından emin misin?")
+        st.code(robot_email, language="text") # Robotun mailini kopyalaman için ekrana basar
+        st.error(f"Teknik Hata Detayı: {e}")
         return []
 
 def select_dish(pool, category, usage_history, current_day_obj, constraints=None):

@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import json
 import base64
+import pandas as pd
 from .utils import *
 
 def analyze_invoice_pdf(uploaded_file, model_name):
@@ -14,11 +15,9 @@ def analyze_invoice_pdf(uploaded_file, model_name):
     prompt = """
     FATURAYI analiz et.
     1. Tedarikçi Firmayı Bul.
-    2. Kalemlerin KDV HARİÇ BİRİM FİYATINI bul.
-    3. HESAPLAMA: "5KG", "Teneke" gibi paketse, BİRİM FİYATI (KG/LT) hesapla.
-    ÇIKTI FORMATI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT | MİKTAR (Sayı) | BİRİM (KG/LT)
-    Örnek: Alp Et | Kıyma | 450.00 | 50 | KG
-    Sadece veriyi ver. Markdown kullanma.
+    2. HESAPLAMA: "5KG", "Teneke" gibi paketse, BİRİM FİYATI (KG/LT) hesapla.
+    ÇIKTI FORMATI: TEDARİKÇİ | ÜRÜN ADI | GÜNCEL BİRİM FİYAT | MİKTAR | BİRİM (KG/LT/Adet)
+    Markdown kullanma.
     """
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": base64_pdf}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
     try:
@@ -27,7 +26,26 @@ def analyze_invoice_pdf(uploaded_file, model_name):
         return True, response.json()['candidates'][0]['content']['parts'][0]['text']
     except Exception as e: return False, str(e)
 
-def update_price_list(raw_text):
+def text_to_dataframe_fatura(raw_text):
+    data = []
+    lines = raw_text.split('\n')
+    for line in lines:
+        line = line.replace("*", "").strip()
+        if "|" in line:
+            parts = [p.strip() for p in line.split('|')]
+            if "TEDARİKÇİ" in parts[0].upper(): continue
+            while len(parts) < 5: parts.append("0")
+            
+            data.append({
+                "TEDARİKÇİ": parts[0],
+                "ÜRÜN ADI": parts[1],
+                "BİRİM FİYAT": parts[2],
+                "MİKTAR": parts[3],
+                "BİRİM": parts[4]
+            })
+    return pd.DataFrame(data)
+
+def update_price_list_dataframe(df):
     client = get_gspread_client()
     if not client: return False, "Bağlantı Hatası"
     try:
@@ -50,38 +68,37 @@ def update_price_list(raw_text):
         updates_batch, new_rows_batch = [], []
         cnt_upd, cnt_new = 0, 0
         
-        lines = raw_text.split('\n')
-        for line in lines:
-            line = line.replace("*", "").replace("- ", "").strip()
-            if "|" in line:
-                parts = [p.strip() for p in line.split('|')]
-                if "TEDARİKÇİ" in parts[0].upper(): continue
-                while len(parts) < 5: parts.append("0")
-                if clean_number(parts[2]) == 0: continue
+        # DataFrame üzerinden dön
+        for index, row in df.iterrows():
+            raw_supplier = str(row["TEDARİKÇİ"])
+            target_supplier = resolve_company_name(raw_supplier, client, existing_companies_list)
+            
+            raw_prod = str(row["ÜRÜN ADI"])
+            final_prod = resolve_product_name(raw_prod, client)
+            
+            fiyat = clean_number(row["BİRİM FİYAT"])
+            miktar = clean_number(row["MİKTAR"])
+            birim = str(row["BİRİM"]).upper()
+            bugun = datetime.now().strftime("%d.%m.%Y")
+            
+            if fiyat == 0: continue # Fiyatı olmayan satırı atla
+            
+            key = f"{turkish_lower(target_supplier)}|{turkish_lower(final_prod)}"
+            
+            if key in product_map:
+                item = product_map[key]
+                row_idx = item['row']
+                new_quota = item['quota'] + miktar
                 
-                raw_supplier = parts[0]
-                target_supplier = resolve_company_name(raw_supplier, client, existing_companies_list)
-                raw_prod = parts[1].strip()
-                final_prod = resolve_product_name(raw_prod, client)
-                fiyat = clean_number(parts[2])
-                miktar = clean_number(parts[3])
-                birim = parts[4].strip().upper()
-                bugun = datetime.now().strftime("%d.%m.%Y")
+                updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]})
+                updates_batch.append({'range': f'E{row_idx}', 'values': [[bugun]]})
+                updates_batch.append({'range': f'F{row_idx}', 'values': [[new_quota]]})
+                updates_batch.append({'range': f'G{row_idx}', 'values': [[birim]]})
+                cnt_upd += 1
+            else:
+                new_rows_batch.append([target_supplier, final_prod, fiyat, "TL", bugun, miktar, birim])
+                cnt_new += 1
                 
-                key = f"{turkish_lower(target_supplier)}|{turkish_lower(final_prod)}"
-                
-                if key in product_map:
-                    item = product_map[key]
-                    row_idx = item['row']
-                    new_quota = item['quota'] + miktar
-                    updates_batch.append({'range': f'C{row_idx}', 'values': [[fiyat]]})
-                    updates_batch.append({'range': f'E{row_idx}', 'values': [[bugun]]})
-                    updates_batch.append({'range': f'F{row_idx}', 'values': [[new_quota]]})
-                    updates_batch.append({'range': f'G{row_idx}', 'values': [[birim]]})
-                    cnt_upd += 1
-                else:
-                    new_rows_batch.append([target_supplier, final_prod, fiyat, "TL", bugun, miktar, birim])
-                    cnt_new += 1
         if updates_batch: ws.batch_update(updates_batch)
         if new_rows_batch: ws.append_rows(new_rows_batch)
         return True, f"✅ {cnt_upd} güncellendi, {cnt_new} eklendi."
@@ -89,17 +106,30 @@ def update_price_list(raw_text):
 
 def render_page(sel_model):
     st.header("🧾 Fiyat & Stok Güncelleme")
-    st.info("PDF Fatura yükle. Fiyatlar güncellenir, Miktarlar stoka eklenir.")
     pdf = st.file_uploader("PDF Fatura", type=['pdf'])
+    
     if pdf:
         if st.button("Analiz Et"):
             with st.spinner("Okunuyor..."):
-                s, r = analyze_invoice_pdf(pdf, sel_model)
-                st.session_state['inv'] = r
-        if 'inv' in st.session_state:
-            with st.form("upd"):
-                ed = st.text_area("Algılanan", st.session_state['inv'], height=200)
-                if st.form_submit_button("İşle (Stoka Ekle)"):
-                    s, m = update_price_list(ed)
-                    if s: st.success(m); del st.session_state['inv']
-                    else: st.error(m)
+                s, raw_text = analyze_invoice_pdf(pdf, sel_model)
+                if s:
+                    df = text_to_dataframe_fatura(raw_text)
+                    st.session_state['fatura_df'] = df
+                else:
+                    st.error(f"Hata: {raw_text}")
+                    
+    if 'fatura_df' in st.session_state:
+        st.info("👇 Faturayı kontrol et, hataları düzelt.")
+        edited_df = st.data_editor(
+            st.session_state['fatura_df'],
+            num_rows="dynamic",
+            use_container_width=True
+        )
+        
+        if st.button("💾 İşle (Stoka Ekle)"):
+            s, m = update_price_list_dataframe(edited_df)
+            if s:
+                st.success(m)
+                del st.session_state['fatura_df']
+            else:
+                st.error(m)

@@ -9,12 +9,11 @@ from datetime import datetime
 
 from modules.utils import (
     get_gspread_client, 
-    get_price_database, 
+    get_company_list,
+    resolve_product_name,
     get_or_create_worksheet, 
-    resolve_company_name, 
     clean_number, 
-    find_best_match, 
-    turkish_lower,
+    find_best_match,
     FILE_STOK,
     PRICE_SHEET_NAME
 )
@@ -31,12 +30,12 @@ def analyze_receipt_image(image, model_name):
     headers = {'Content-Type': 'application/json'}
     
     prompt = """
-    Bu irsaliye/fatura görüntüsünü analiz et.
-    1. Tedarikçi firma adını en üstten bul.
-    2. Tarihi bul (GG.AA.YYYY formatına çevir).
-    3. Tablodaki her satırı şu formatta çıkar:
-    TEDARİKÇİ | TARİH | ÜRÜN ADI | MİKTAR | BİRİM (KG/ADET/LİTRE/KOLİ) | BİRİM FİYAT | TOPLAM TUTAR
-    Kurallar: Fiyat/Tutar boşsa 0 yaz. Markdown yok. Sadece veri.
+    Bu İRSALİYEYİ analiz et.
+    Sadece kalemleri çıkar. Firma ismine veya tarihe bakma.
+    MİKTARLARI yazarken Binlik Ayracı kullanma (1500 yaz).
+    
+    ÇIKTI FORMATI:
+    ÜRÜN ADI | MİKTAR | BİRİM
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
@@ -51,75 +50,116 @@ def text_to_dataframe(raw_text):
     lines = raw_text.split('\n')
     for line in lines:
         clean_line = line.replace("*", "").strip()
-        if not clean_line or "TEDARİKÇİ" in clean_line: continue
+        if not clean_line or "ÜRÜN ADI" in clean_line.upper(): continue
         if "|" in clean_line:
             parts = [p.strip() for p in clean_line.split('|')]
-            while len(parts) < 7: parts.append("0")
-            data.append({"TEDARİKÇİ": parts[0], "TARİH": parts[1], "ÜRÜN ADI": parts[2], "MİKTAR": parts[3], "BİRİM": parts[4], "BİRİM FİYAT": parts[5], "TOPLAM TUTAR": parts[6]})
+            while len(parts) < 3: parts.append("0")
+            # İrsaliyede fiyat olmaz genelde, 0 kabul edeceğiz, veritabanından çekeceğiz
+            data.append({"ÜRÜN ADI": parts[0], "MİKTAR": parts[1], "BİRİM": parts[2]})
     return pd.DataFrame(data)
 
-def save_receipt_dataframe(df):
+def save_receipt_dataframe(df, company, date_obj):
     client = get_gspread_client()
     if not client: return False, "Google Sheets Bağlantı Hatası"
     
+    date_str = date_obj.strftime("%d.%m.%Y")
+    
     try:
-        price_db = get_price_database(client)
-        known_companies = list(price_db.keys())
         sh = client.open(FILE_STOK) 
         price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
-        existing_sheets = {turkish_lower(ws.title): ws for ws in sh.worksheets()}
+        price_data = price_ws.get_all_values()
         
-        firm_data = {}
-        kota_updates = []
+        # Firma Sayfası
+        ws_company = get_or_create_worksheet(sh, company, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "TUTAR", "İŞLEM TÜRÜ"])
+        
+        # Stok Haritası
+        product_map = {}
+        for idx, row in enumerate(price_data):
+            if idx == 0: continue
+            if len(row) >= 2:
+                db_comp = row[0].strip()
+                db_prod = row[1].strip()
+                if db_comp == company:
+                    # Kota ve Fiyatı al
+                    product_map[db_prod.lower()] = {
+                        "row": idx + 1, 
+                        "quota": clean_number(row[5]) if len(row) >= 6 else 0.0,
+                        "price": clean_number(row[2]) # Fiyatı DB'den alacağız
+                    }
+        
+        quota_updates = []
+        company_log_rows = []
         msg = []
         
         for index, row in df.iterrows():
-            ocr_raw_name = str(row["TEDARİKÇİ"])
-            final_firma = resolve_company_name(ocr_raw_name, client, known_companies)
+            raw_prod = str(row["ÜRÜN ADI"])
+            final_prod = resolve_product_name(raw_prod, client, company)
             
-            tarih, urun_adi, miktar_str = str(row["TARİH"]), str(row["ÜRÜN ADI"]), str(row["MİKTAR"])
-            m_val = clean_number(miktar_str)
+            miktar = clean_number(row["MİKTAR"])
             birim = str(row["BİRİM"]).upper()
-            fiyat_str, tutar_str = str(row["BİRİM FİYAT"]), str(row["TOPLAM TUTAR"])
             
-            final_urun = urun_adi
-            if final_firma in price_db:
-                prods = list(price_db[final_firma].keys())
-                match_prod = find_best_match(urun_adi, prods, cutoff=0.7)
-                if match_prod:
-                    db_item = price_db[final_firma][match_prod]
-                    final_urun = match_prod
-                    f_val = clean_number(fiyat_str)
-                    if f_val == 0: f_val = db_item['fiyat']; fiyat_str = str(f_val)
-                    if clean_number(tutar_str) == 0: tutar_str = f"{m_val * f_val:.2f}"
-                    
-                    new_kota = db_item['kota'] - m_val
-                    kota_updates.append({'range': f'F{db_item["row"]}', 'values': [[new_kota]]})
+            # Fiyat bul (DB'den)
+            fiyat = 0.0
+            key = final_prod.lower()
             
-            if final_firma not in firm_data: firm_data[final_firma] = []
-            firm_data[final_firma].append([tarih, final_urun, miktar_str, birim, fiyat_str, "TL", tutar_str])
+            if key in product_map:
+                item = product_map[key]
+                fiyat = item['price']
+                
+                # İRSALİYE GİRİŞİ -> MAL GELDİ -> STOK DÜŞER (-)
+                # (Çünkü Fatura ile +100 hak vermiştik, şimdi 40'ını aldık, 60 kaldı)
+                new_quota = item['quota'] - miktar
+                
+                quota_updates.append({'range': f'F{item["row"]}', 'values': [[new_quota]]})
+                msg.append(f"📉 DÜŞÜLDÜ: {final_prod} -> -{miktar} {birim} (Kalan Hak: {new_quota})")
+            else:
+                # Ürün faturada hiç girilmemiş ama irsaliyede geldi (Borçlanma)
+                # Bu durumda kotayı eksiye düşürecek bir satırımız yok, kullanıcıya uyarı vermek lazım.
+                # Veya yeni satır açıp -miktar yazabiliriz.
+                # Şimdilik uyarı verelim:
+                msg.append(f"⚠️ UYARI: {final_prod} faturası bulunamadı, stoktan düşülemedi.")
             
-        for firma, rows in firm_data.items():
-            fn = turkish_lower(firma)
-            ws = existing_sheets.get(fn)
-            if not ws:
-                try: ws = get_or_create_worksheet(sh, firma, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "PARA BİRİMİ", "TOPLAM TUTAR"])
-                except: pass
-            if ws: ws.append_rows(rows); msg.append(f"{firma}: {len(rows)} kalem")
+            tutar = miktar * fiyat
+            
+            # Firma Log
+            company_log_rows.append([
+                date_str, 
+                final_prod, 
+                miktar, 
+                birim, 
+                fiyat, 
+                f"{tutar:.2f}", 
+                "Mal Kabul Edildi" # İrsaliye İşareti
+            ])
         
-        if kota_updates: price_ws.batch_update(kota_updates); msg.append("(Stoktan Düşüldü)")
+        if quota_updates: price_ws.batch_update(quota_updates)
+        if company_log_rows: ws_company.append_rows(company_log_rows)
     
         return True, " | ".join(msg)
     except Exception as e: return False, f"Genel Hata: {str(e)}"
 
 def render_page(sel_model):
-    st.header("📝 Tüketim Fişi (İrsaliye) Girişi")
+    st.header("📝 İrsaliye Girişi (Mal Kabul)")
+    st.info("ℹ️ İrsaliye girdiğinde firmanın bakiyesi (stok) **AZALIR**.")
     st.markdown("---")
-    f = st.file_uploader("Fiş/İrsaliye Yükle", type=['jpg', 'png', 'jpeg'])
+    
+    client = get_gspread_client()
+    companies = get_company_list(client) if client else []
+    
+    if not companies:
+        st.error("⚠️ Firma listesi boş!")
+        st.stop()
+        
+    c1, c2 = st.columns(2)
+    selected_company = c1.selectbox("Firma Seç", companies)
+    selected_date = c2.date_input("İrsaliye Tarihi", datetime.now())
+    
+    f = st.file_uploader("İrsaliye Fişi Yükle", type=['jpg', 'png', 'jpeg'])
+    
     if f:
         img = Image.open(f)
-        st.image(img, caption="Yüklenen Belge", width=300)
-        if st.button("🔍 Belgeyi Analiz Et", type="primary"):
+        st.image(img, caption="Belge", width=300)
+        if st.button("🔍 İrsaliyeyi Analiz Et", type="primary"):
             with st.spinner("Okunuyor..."):
                 s, raw_text = analyze_receipt_image(img, sel_model)
                 if s:
@@ -129,10 +169,10 @@ def render_page(sel_model):
     if 'irsaliye_df' in st.session_state:
         edited_df = st.data_editor(st.session_state['irsaliye_df'], num_rows="dynamic", use_container_width=True)
         if st.button("💾 Kaydet ve Stoktan Düş", type="primary"):
-            with st.spinner("Kaydediliyor..."):
-                success, msg = save_receipt_dataframe(edited_df)
+            with st.spinner("İşleniyor..."):
+                success, msg = save_receipt_dataframe(edited_df, selected_company, selected_date)
                 if success:
-                    st.balloons(); st.success(msg)
+                    st.balloons(); st.success("✅ İrsaliye İşlendi!")
+                    st.write(msg)
                     del st.session_state['irsaliye_df']
-                    st.rerun()
                 else: st.error(f"Kayıt Hatası: {msg}")

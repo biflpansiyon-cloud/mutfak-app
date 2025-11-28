@@ -7,8 +7,8 @@ import re
 import os
 from modules.utils import (
     get_gspread_client, 
-    get_drive_service, # Drive servisi geri geldi
-    find_folder_id,    # Klasör bulucu geri geldi
+    get_drive_service,
+    find_folder_id,
     FILE_FINANS, 
     SHEET_YATILI, 
     SHEET_GUNDUZLU, 
@@ -17,7 +17,39 @@ from modules.utils import (
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# --- DRIVE İŞLEMLERİ (Sadece Finans Modülü İçin) ---
+# --- YENİ EKLENEN FONKSİYON: TÜRKÇE BAŞLIK DÜZENLEME ---
+def tr_title_case(metin):
+    """
+    Türkçe karakter sorununu (I/i, İ/ı) çözerek Title Case yapar.
+    Örnek: "İSTANBUL ve IĞDIR" -> "İstanbul Ve Iğdır"
+    """
+    if not metin:
+        return ""
+    
+    kelimeler = str(metin).split() # str() ekledik, sayı gelirse hata vermesin
+    yeni_kelimeler = []
+    
+    for kelime in kelimeler:
+        # Önce tamamen Türkçe uyumlu küçük harfe çevir
+        kucuk_hal = kelime.replace('I', 'ı').replace('İ', 'i').lower()
+        
+        # İlk harfi al ve Türkçe kuralına göre büyüt
+        if len(kucuk_hal) > 0:
+            ilk_harf = kucuk_hal[0]
+            if ilk_harf == 'i':
+                ilk_harf = 'İ'
+            elif ilk_harf == 'ı':
+                ilk_harf = 'I'
+            else:
+                ilk_harf = ilk_harf.upper()
+            
+            yeni_kelimeler.append(ilk_harf + kucuk_hal[1:])
+        else:
+            yeni_kelimeler.append(kucuk_hal)
+            
+    return " ".join(yeni_kelimeler)
+
+# --- DRIVE İŞLEMLERİ ---
 def download_file_from_drive(service, file_id):
     try:
         request = service.files().get_media(fileId=file_id)
@@ -27,7 +59,6 @@ def download_file_from_drive(service, file_id):
         return None
 
 def sanitize_filename(name):
-    # Dosya ismindeki geçersiz karakterleri temizler
     safe = str(name).replace("/", "-").replace(":", "-")
     safe = re.sub(r'[^\w\s.-]', '', safe)
     return safe.strip()
@@ -37,8 +68,6 @@ def move_and_rename_file_in_drive(service, file_id, source_folder_id, destinatio
         file_metadata = {}
         if new_name:
             file_metadata['name'] = sanitize_filename(new_name)
-            
-        # Dosyayı taşı ve ismini güncelle
         service.files().update(
             fileId=file_id,
             addParents=destination_folder_id, 
@@ -105,7 +134,6 @@ def distribute_yatili_installments(total_fee, year):
             new_data.append([name, "", total_fee, 0, total_fee, inst_amt, inst_amt, inst_amt, inst_amt])
         ws.clear(); ws.update(values=new_data, range_name="A1")
         
-        # Ayarlar sayfasına da yıllık toplamı işle
         ws_set = sh.worksheet(SHEET_FINANS_AYARLAR)
         ws_set.append_row([year, '', total_fee], value_input_option='USER_ENTERED')
         
@@ -125,6 +153,9 @@ def process_yatili_payment(analiz, dekont_link):
         df = pd.DataFrame(ws.get_all_records())
         
         aranan = analiz.get('ogrenci_ad', '')
+        # Buraya da bir koruma ekleyelim, listeden ararken temiz olsun
+        aranan = tr_title_case(aranan) 
+        
         bulunan = find_best_match(aranan, df['Ad_Soyad'].tolist())
         if not bulunan: return False, f"'{aranan}' bulunamadı.", 0
             
@@ -151,7 +182,18 @@ def write_to_gunduzlu_sheet(analiz, dekont_link):
         client = get_gspread_client()
         sh = client.open(FILE_FINANS)
         ws = sh.worksheet(SHEET_GUNDUZLU)
-        new_row = [analiz.get('ogrenci_tc', ''), analiz.get('ogrenci_ad', 'Bilinmiyor'), '', analiz.get('tarih', ''), '', '', analiz.get('tutar', 0), 'Ödendi', dekont_link]
+        # İsmi kaydederken yine de tr_title_case kullanıyoruz, garanti olsun
+        new_row = [
+            analiz.get('ogrenci_tc', ''), 
+            tr_title_case(analiz.get('ogrenci_ad', 'Bilinmiyor')), 
+            '', 
+            analiz.get('tarih', ''), 
+            '', 
+            '', 
+            analiz.get('tutar', 0), 
+            'Ödendi', 
+            dekont_link
+        ]
         ws.append_row(new_row, value_input_option='USER_ENTERED')
         return True
     except: return False
@@ -179,7 +221,6 @@ def render_page(selected_model):
         if not df.empty: st.dataframe(df, use_container_width=True)
         else: st.warning("Veri yok.")
 
-    # --- DRIVE DEKONT İŞLEME MODÜLÜ ---
     with tab3:
         st.subheader("🤖 Drive Dekont Analizi")
         service = get_drive_service()
@@ -188,8 +229,6 @@ def render_page(selected_model):
             st.error("Drive bağlantısı kurulamadı. secrets ayarlarını kontrol et.")
             st.stop()
             
-        # Drive Klasörlerini Bul
-        # Dikkat: Bu isimlerin Drive'ında birebir aynı olması lazım.
         root_id = find_folder_id(service, "Mutfak_ERP_Drive")
         finans_id = find_folder_id(service, "Finans", parent_id=root_id)
         gelen_id = find_folder_id(service, "Gelen_Dekontlar", parent_id=finans_id)
@@ -197,16 +236,14 @@ def render_page(selected_model):
         arsiv_gunduzlu_id = find_folder_id(service, "Arsiv_Gunduzlu", parent_id=finans_id)
         
         if not gelen_id:
-            st.warning("⚠️ 'Gelen_Dekontlar' klasörü bulunamadı. Lütfen 'Mutfak_ERP_Drive/Finans/Gelen_Dekontlar' yolunu kontrol et.")
+            st.warning("⚠️ 'Gelen_Dekontlar' klasörü bulunamadı.")
         else:
-            # Dosyaları Listele
             results = service.files().list(q=f"'{gelen_id}' in parents and trashed=false", fields="files(id, name, mimeType)").execute()
             files = results.get('files', [])
             
             st.info(f"📂 İşlenmeyi Bekleyen: **{len(files)}** Dekont")
             
             if files:
-                # Dosya Seçimi
                 file_map = {f['id']: f['name'] for f in files}
                 sel_id = st.selectbox("İşlenecek Dekontu Seç:", list(file_map.keys()), format_func=lambda x: file_map[x])
                 sel_meta = next(f for f in files if f['id'] == sel_id)
@@ -216,12 +253,18 @@ def render_page(selected_model):
                         file_data = download_file_from_drive(service, sel_id)
                         res = analyze_receipt_with_gemini(file_data, sel_meta['mimeType'], selected_model)
                         if res:
+                            # --- 1. MÜDAHALE: AI'dan gelen veriyi hemen düzelt ---
+                            if 'ogrenci_ad' in res:
+                                res['ogrenci_ad'] = tr_title_case(res['ogrenci_ad'])
+                            if 'gonderen_ad_soyad' in res:
+                                res['gonderen_ad_soyad'] = tr_title_case(res['gonderen_ad_soyad'])
+                            # ----------------------------------------------------
+
                             st.session_state['last_analysis'] = res
                             st.session_state['last_file_id'] = sel_id
                             st.success("Analiz Başarılı! Aşağıdan kontrol et 👇")
                         else: st.error("Analiz başarısız oldu.")
                 
-                # --- MANUEL DÜZELTME VE KAYIT EKRANI ---
                 if st.session_state.get('last_analysis') and st.session_state.get('last_file_id') == sel_id:
                     analiz = st.session_state['last_analysis']
                     st.divider()
@@ -229,6 +272,7 @@ def render_page(selected_model):
                     
                     with st.form("dekont_onay"):
                         c1, c2 = st.columns(2)
+                        # Burada input'a düzeltilmiş hal gelir
                         y_ad = c1.text_input("Öğrenci Adı Soyadı", value=analiz.get('ogrenci_ad', ''))
                         y_tc = c2.text_input("TC No", value=analiz.get('ogrenci_tc', ''))
                         
@@ -238,10 +282,12 @@ def render_page(selected_model):
                         y_tur = c4.selectbox("Ödeme Türü", ["YEMEK", "TAKSİT"], index=tur_idx)
                         
                         if st.form_submit_button("✅ Onayla, Kaydet ve Taşı"):
-                            # Verileri Güncelle
+                            # --- 2. MÜDAHALE: Kullanıcı elle değiştirmiş olabilir, tekrar düzelt ---
+                            y_ad = tr_title_case(y_ad)
+                            # ----------------------------------------------------------------------
+                            
                             analiz.update({'ogrenci_ad': y_ad, 'ogrenci_tc': y_tc, 'tutar': y_tut, 'tur_tahmini': y_tur})
                             
-                            # Link Oluştur
                             link = f"https://drive.google.com/file/d/{sel_id}/view"
                             
                             basari = False
@@ -268,11 +314,9 @@ def render_page(selected_model):
                                 else: msg = txt
                             
                             if basari and hedef_klasor:
-                                # Dosyayı Taşı
                                 if move_and_rename_file_in_drive(service, sel_id, gelen_id, hedef_klasor, yeni_isim):
                                     st.success(f"✅ {msg}")
                                     st.info(f"📂 Dosya **{yeni_isim}** olarak arşivlendi.")
-                                    # Temizlik
                                     del st.session_state['last_analysis']
                                     del st.session_state['last_file_id']
                                     st.rerun()

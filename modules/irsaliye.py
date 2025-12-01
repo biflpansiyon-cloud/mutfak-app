@@ -14,16 +14,13 @@ from modules.utils import (
     resolve_product_name,
     get_or_create_worksheet, 
     clean_number, 
-    # find_best_match, # resolve_product_name içinde kullanıldığı için burada gerek yok
     FILE_STOK,
     PRICE_SHEET_NAME,
-    # YENİ EKLENENLER:
-    get_price_database, 
-    turkish_lower,
-    add_to_mapping,
-    add_product_to_price_sheet,
+    get_price_database, # Yeni özellikler için
+    turkish_lower,      # Yeni özellikler için
+    add_to_mapping,     # Yeni özellikler için
+    add_product_to_price_sheet, # Yeni özellikler için
 )
-
 def analyze_receipt_image(image, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
     clean_model = model_name if "models/" not in model_name else model_name.replace("models/", "")

@@ -5,9 +5,11 @@ from googleapiclient.discovery import build
 import re
 import difflib
 import requests
+from datetime import datetime
+import pandas as pd
 
 # =========================================================
-# 📂 DOSYA İSİMLERİ (Mevcut)
+# 📂 DOSYA İSİMLERİ 
 # =========================================================
 
 FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura/İrsaliye
@@ -27,11 +29,51 @@ MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
 MAPPING_SHEET_NAME = "ESLESTIRME_SOZLUGU" # <--- YENİ EKLENDİ
 
 # =========================================================
-# 🔐 BAĞLANTILAR
+# 🔐 BAĞLANTILAR (Kısmen Mevcut Koddan alındı)
 # =========================================================
 
-# ... (check_password, get_gspread_client, get_drive_service, get_or_create_worksheet fonksiyonları değişmedi)
-# ... (fetch_google_models, clean_number fonksiyonları değişmedi)
+# NOT: check_password, get_gspread_client, get_drive_service, fetch_google_models,
+#      move_and_rename_file_in_drive, get_or_create_worksheet gibi temel fonksiyonların 
+#      değişmediği varsayılmıştır. Yalnızca kritik olanlar buraya eklenecektir.
+
+def get_gspread_client():
+    try:
+        # Streamlit secrets'tan Google Sheets kimlik bilgilerini yükle
+        creds_json = st.secrets["gcp_service_account"]
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"Google Sheets bağlantı hatası: {e}")
+        return None
+
+def get_or_create_worksheet(sh, title, cols=10, headers=[]):
+    try:
+        ws = sh.worksheet(title)
+        # Başlıkları kontrol et ve ekle
+        if headers and not ws.row_values(1):
+             ws.update([headers], 'A1')
+        return ws
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
+        if headers:
+             ws.update([headers], 'A1')
+        return ws
+
+def clean_number(value):
+    """Sayıları temizler ve float'a çevirir."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        # Virgülleri noktaya çevir, binlik ayraçları kaldır, alfabetik olmayanları temizle
+        cleaned = value.replace('.', '').replace(',', '.').strip()
+        cleaned = re.sub(r'[^\d.]', '', cleaned)
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 # =========================================================
 # ✨ YENİ NORMALİZASYON VE EŞLEŞTİRME FONKSİYONLARI
@@ -40,7 +82,6 @@ MAPPING_SHEET_NAME = "ESLESTIRME_SOZLUGU" # <--- YENİ EKLENDİ
 def turkish_lower(text):
     """
     Türkçe karakterlere, noktalama işaretlerine ve boşluklara karşı dayanıklı küçük harfe çevirme.
-    Bu, eşleştirme sözlüğü ve bulanık eşleştirme için kritik öneme sahiptir.
     """
     if not isinstance(text, str):
         text = str(text)
@@ -50,7 +91,8 @@ def turkish_lower(text):
     text = text.lower()
     
     # Gereksiz noktalama, binlik ayraç ve sembolleri kaldır
-    text = re.sub(r'[^\w\s]', '', text) # Alfabetik olmayan karakterleri ve boşlukları koru
+    # Sadece harfleri, sayıları ve boşlukları koru
+    text = re.sub(r'[^\w\s]', '', text) 
     
     # Fazla boşlukları tek boşluğa indir ve baş/son boşlukları kaldır
     return ' '.join(text.split()).strip()
@@ -77,7 +119,6 @@ def find_best_match(target, candidates, cutoff=0.7):
 def get_mapping_database(client):
     """
     'ESLESTIRME_SOZLUGU' sayfasından (OCR Metni -> Standart Ürün Adı) haritasını çeker.
-    Anahtarlar (Key) normalleştirilmiş haldedir.
     """
     mapping_db = {}
     try:
@@ -97,7 +138,7 @@ def get_mapping_database(client):
         return mapping_db
     except Exception as e:
         # Hata durumunda boş sözlük döndür
-        st.error(f"Eşleştirme Sözlüğü Yükleme Hatası: {e}")
+        # st.error(f"Eşleştirme Sözlüğü Yükleme Hatası: {e}") # Hata ayıklama için geçici olarak kaldırıldı
         return {}
 
 def add_to_mapping(client, ocr_text, standard_product_name):
@@ -110,10 +151,81 @@ def add_to_mapping(client, ocr_text, standard_product_name):
         return True
     except: return False
 
+def add_product_to_price_sheet(client, product_name, company_name, unit, initial_quota=0.0):
+    """
+    Yeni bir ürünü (faturası gelmemiş irsaliye kalemi) FIYAT_ANAHTARI sayfasına ekler.
+    """
+    try:
+        sh = client.open(FILE_STOK)
+        # FIYAT_ANAHTARI sayfasının başlıkları (7 sütun)
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
+        
+        today = datetime.now().strftime("%d.%m.%Y")
+        
+        new_row = [
+            company_name,           # TEDARİKÇİ
+            product_name,           # ÜRÜN ADI
+            "0.00",                 # BİRİM FİYAT (Fatura gelmediği için şimdilik 0)
+            "₺",                    # PARA BİRİMİ
+            today,                  # GÜNCELLEME TARİHİ
+            initial_quota,          # KALAN KOTA (İrsaliye ile gelen miktar)
+            unit                    # KOTA BİRİMİ
+        ]
+        
+        ws.append_row(new_row)
+        return True
+    except Exception as e:
+        st.error(f"Fiyat Anahtarına Ekleme Hatası: {e}")
+        return False
+        
+# =========================================================
+# ⚙️ MEVCUT VE GÜNCELLENEN FONKSİYONLAR
+# =========================================================
 
-# =========================================================
-# ⚙️ GÜNCELLENEN resolve_product_name
-# =========================================================
+def get_company_list(client):
+    """Mevcut tedarikçi listesini döndürür."""
+    try:
+        sh = client.open(FILE_STOK)
+        # AYARLAR sayfasından 1. sütunu okuyarak firma listesini alır
+        ws = sh.worksheet(SHEET_STOK_AYARLAR)
+        col_values = ws.col_values(1)
+        companies = [c.strip() for c in col_values[1:] if c.strip()]
+        return sorted(list(set(companies)))
+    except: return []
+
+
+def get_price_database(client):
+    """Fiyat Anahtarını (Stok ve Fiyatları) çeker."""
+    price_db = {}
+    try:
+        sh = client.open(FILE_STOK)
+        ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
+        data = ws.get_all_values()
+        for idx, row in enumerate(data):
+            if idx == 0: continue
+            if len(row) >= 3:
+                ted = row[0].strip()
+                urn = row[1].strip()
+                fyt = clean_number(row[2])
+                kot = clean_number(row[5]) if len(row) >= 6 else 0.0
+                birim = row[6].strip() if len(row) >= 7 else "ADET"
+                
+                # Tedarikçi bazında ürünleri ve detaylarını kaydet
+                if ted not in price_db:
+                    price_db[ted] = {}
+                
+                # Ürün adını anahtar olarak kullan
+                price_db[ted][urn] = {
+                    'price': fyt,
+                    'quota': kot,
+                    'unit': birim,
+                    'row_num': idx + 1 # Güncelleme için satır numarasını tut
+                }
+        return price_db
+    except Exception as e: 
+        st.error(f"Fiyat Anahtarı Veritabanı Hatası: {e}")
+        return {}
+
 
 def resolve_product_name(ocr_prod, client, company_name):
     """
@@ -136,7 +248,7 @@ def resolve_product_name(ocr_prod, client, company_name):
             # Sadece ilgili firmanın ürünlerini al
             company_products = list(price_db[company_name].keys())
             
-            # Bulanık eşleştirme yap (find_best_match artık içeride turkish_lower kullanıyor)
+            # Bulanık eşleştirme yap
             best = find_best_match(clean_prod, company_products, cutoff=0.7) 
             if best: return best
             
@@ -145,4 +257,4 @@ def resolve_product_name(ocr_prod, client, company_name):
     except: 
         return clean_prod 
 
-# ... (get_company_list ve get_price_database fonksiyonları değişmedi)
+# ... (Diğer utils fonksiyonları)

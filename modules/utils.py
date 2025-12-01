@@ -147,16 +147,66 @@ def get_company_list(client):
         return sorted(list(set(companies)))
     except: return []
 
-def resolve_product_name(ocr_prod, client, company_name):
-    clean_prod = ocr_prod.replace("*", "").strip()
+# modules/utils.py
+
+# ... (Mevcut Fonksiyonlar)
+
+def get_mapping_database(client):
+    """Eşleştirme Sözlüğü sayfasından (OCR Metni -> Standart Ürün Adı) haritasını çeker."""
+    mapping_db = {}
     try:
+        sh = client.open(FILE_STOK)
+        ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
+        data = ws.get_all_values()
+        for idx, row in enumerate(data):
+            if idx == 0: continue
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                # OCR metnini normalleştirilmiş ve temizlenmiş anahtar olarak kullan
+                ocr_key = turkish_lower(row[0].strip()) 
+                std_value = row[1].strip()
+                mapping_db[ocr_key] = std_value
+        return mapping_db
+    except Exception as e:
+        return {}
+
+def add_to_mapping(client, ocr_text, standard_product_name):
+    """Yeni bir eşleşmeyi sözlüğe ekler."""
+    try:
+        sh = client.open(FILE_STOK)
+        ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
+        # Eşleşmeyi direkt olarak ekle
+        ws.append_row([ocr_text, standard_product_name])
+        return True
+    except: return False
+
+def resolve_product_name(ocr_prod, client, company_name):
+    """
+    Ürün adını sırayla Eşleştirme Sözlüğü ve Bulanık Eşleştirme kullanarak çözer.
+    Eğer çözülürse standart ismi, çözülmezse ham OCR metnini döndürür.
+    """
+    clean_prod = ocr_prod.replace("*", "").strip()
+    norm_prod = turkish_lower(clean_prod) # Büyük/küçük harf duyarsız anahtar
+
+    try:
+        # A) Eşleştirme Sözlüğünde Ara
+        mapping_db = get_mapping_database(client)
+        if norm_prod in mapping_db:
+            return mapping_db[norm_prod] # Doğrudan standart ismi döndür
+        
+        # B) Sözlükte Yoksa, Fiyat Veritabanında Bulanık Eşleştirme Yap
         price_db = get_price_database(client)
         if company_name in price_db:
             company_products = list(price_db[company_name].keys())
-            best = find_best_match(clean_prod, company_products, cutoff=0.7)
+            # Bulanık eşleştirmeyi ham metinle yapar (içinde turkish_lower var)
+            best = find_best_match(clean_prod, company_products, cutoff=0.7) 
             if best: return best
+            
+        # C) Hiçbiri Yoksa, ham metni döndür (kullanıcı manuel düzeltecek)
         return clean_prod
-    except: return clean_prod
+    except: 
+        return clean_prod 
+        
+# ... (Geri kalan get_company_list, get_price_database, vb. fonksiyonlar olduğu gibi kalmıştır)
 
 def get_price_database(client):
     price_db = {}

@@ -6,7 +6,7 @@ import io
 import base64
 import pandas as pd
 from datetime import datetime
-import re # Eklendi (text_to_dataframe için)
+import re 
 
 from modules.utils import (
     get_gspread_client, 
@@ -16,12 +16,14 @@ from modules.utils import (
     clean_number, 
     FILE_STOK,
     PRICE_SHEET_NAME,
-    get_price_database, # Yeni özellikler için
-    turkish_lower,      # Yeni özellikler için
-    add_to_mapping,     # Yeni özellikler için
-    add_product_to_price_sheet, # Yeni özellikler için
+    get_price_database, 
+    turkish_lower,
+    add_to_mapping,
+    add_product_to_price_sheet,
 )
+
 def analyze_receipt_image(image, model_name):
+    # (Bu fonksiyonun içeriği değişmedi, aynı kalıyor)
     api_key = st.secrets["GOOGLE_API_KEY"]
     clean_model = model_name if "models/" not in model_name else model_name.replace("models/", "")
     
@@ -58,18 +60,17 @@ def text_to_dataframe(raw_text):
             parts = [p.strip() for p in re.split(r'\|', clean_line, maxsplit=2)]
             while len(parts) < 3: parts.append("")
             
-            # RAW_OCR_ADI sütunu eklendi (Ham metin)
             data.append({
                 "ÜRÜN ADI": parts[0], 
                 "MİKTAR": parts[1], 
                 "BİRİM": parts[2],
-                "RAW_OCR_ADI": parts[0] # Orijinal OCR metnini tutuyoruz
+                "RAW_OCR_ADI": parts[0]
             })
     return pd.DataFrame(data)
 
 def save_receipt_dataframe(df, company, date_obj):
+    # (Bu fonksiyonun içeriği değişmedi, hata yönetimi zaten başarılıydı)
     client = get_gspread_client()
-    # YENİ DÖNÜŞ DEĞERLERİ: success, msg, mappings, new_products
     if not client: return False, "Google Sheets Bağlantı Hatası", [], [] 
     
     date_str = date_obj.strftime("%d.%m.%Y")
@@ -77,7 +78,6 @@ def save_receipt_dataframe(df, company, date_obj):
     try:
         sh = client.open(FILE_STOK) 
         price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
-        # get_price_database'i utils'den çekiyoruz
         price_db = get_price_database(client) 
         
         ws_company = get_or_create_worksheet(sh, company, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "TUTAR", "İŞLEM TÜRÜ"])
@@ -87,16 +87,16 @@ def save_receipt_dataframe(df, company, date_obj):
         quota_updates = []
         company_log_rows = []
         msg = []
-        new_mappings_to_suggest = [] # YENİ: Eşleştirme Sözlüğü önerileri
-        new_products_to_suggest = [] # YENİ: Fiyat Anahtarı ürün önerileri
+        new_mappings_to_suggest = [] 
+        new_products_to_suggest = [] 
         
-        # RAW_OCR_ADI sütunu yoksa, 'ÜRÜN ADI'nı kullan (uyumluluk için)
         df['RAW_OCR_ADI'] = df.get('RAW_OCR_ADI', df['ÜRÜN ADI']) 
         
         for index, row in df.iterrows():
             raw_prod = str(row["RAW_OCR_ADI"])  
-            edited_prod = str(row["ÜRÜN ADI"]) # Kullanıcının data_editor'da düzelttiği isim
+            edited_prod = str(row["ÜRÜN ADI"]) 
             
+            # Ürün adını çöz
             final_prod = resolve_product_name(edited_prod, client, company)
             
             miktar = clean_number(row["MİKTAR"])
@@ -116,10 +116,8 @@ def save_receipt_dataframe(df, company, date_obj):
                 quota_updates.append({'range': f'F{item["row"]}', 'values': [[new_quota]]})
                 msg.append(f"📉 DÜŞÜLDÜ: {final_prod} -> -{miktar} {birim} (Kalan Hak: {new_quota})")
                 
-                # --- EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ ---
                 if turkish_lower(raw_prod) != turkish_lower(final_prod):
                     new_mappings_to_suggest.append({"raw": raw_prod, "std": final_prod})
-                # -----------------------------------
             else:
                 # 2. YENİ ÜRÜN (Fiyat Anahtarına Ekleme Önerisi yapılır)
                 new_products_to_suggest.append({
@@ -141,10 +139,10 @@ def save_receipt_dataframe(df, company, date_obj):
         if quota_updates: price_ws.batch_update(quota_updates)
         if company_log_rows: ws_company.append_rows(company_log_rows)
     
-        # YENİ DÖNÜŞ DEĞERLERİ
         return True, " | ".join(msg), new_mappings_to_suggest, new_products_to_suggest 
     except Exception as e: 
-        return False, f"Genel Hata: {str(e)}", [], [] 
+        # Hata yakalandığında kullanıcıya gösterilir
+        return False, f"Genel Kayıt Hatası: {str(e)}", [], [] 
 
 def render_page(sel_model):
     st.header("📝 İrsaliye Girişi (Mal Kabul)")
@@ -167,6 +165,7 @@ def render_page(sel_model):
     if f:
         img = Image.open(f)
         st.image(img, caption="Belge", width=300)
+        # Analiz butonu tıklandığında DF oluşturulur
         if st.button("🔍 İrsaliyeyi Analiz Et", key="analyze_btn", type="primary"):
             with st.spinner("Okunuyor..."):
                 s, raw_text = analyze_receipt_image(img, sel_model)
@@ -186,30 +185,51 @@ def render_page(sel_model):
         st.subheader("Okunan Ürünleri Kontrol Et ve Gerekirse Düzelt")
         edited_df = st.data_editor(temp_df_for_editor, num_rows="dynamic", use_container_width=True)
         
+        # *** HATA GİDERME İÇİN GÜNCEL KISIM ***
         if st.button("💾 Kaydet ve Stoktan Düş", key="save_btn", type="primary"):
             
-            df_to_save = st.session_state['irsaliye_df'].copy()
-            for col in edited_df.columns:
-                 df_to_save[col] = edited_df[col] 
-            
-            with st.spinner("İşleniyor..."):
-                success, msg, suggestions, new_products = save_receipt_dataframe(df_to_save, selected_company, selected_date)
+            try:
+                # 1. Boş DF kontrolü
+                if edited_df.empty:
+                    st.warning("Kaydedilecek ürün bulunamadı. Lütfen tabloyu kontrol edin.")
+                    return # İşlemi durdur
+
+                # 2. Kaydedilecek DF'i RAW_OCR_ADI sütunuyla birlikte oluştur
+                df_to_save = st.session_state['irsaliye_df'].copy()
                 
-                if success:
-                    st.balloons(); st.success("✅ İrsaliye İşlendi!")
-                    st.write(msg)
+                # Sadece kullanıcı tarafından düzenlenmesi beklenen sütunları (ÜRÜN ADI, MİKTAR, BİRİM) güncelle
+                for col in edited_df.columns:
+                     if col in df_to_save.columns:
+                        df_to_save[col] = edited_df[col] 
+
+                # 3. Kayıt ve Spinner
+                with st.spinner("İşleniyor..."):
+                    success, msg, suggestions, new_products = save_receipt_dataframe(df_to_save, selected_company, selected_date)
                     
-                    # Önerileri session_state'e kaydet ve yeniden çalıştır
-                    st.session_state['suggestions'] = suggestions
-                    st.session_state['new_products'] = new_products
-                    del st.session_state['irsaliye_df']
-                    st.rerun() 
-                else: st.error(f"Kayıt Hatası: {msg}")
+                    if success:
+                        st.balloons(); st.success("✅ İrsaliye İşlendi!")
+                        st.write(msg)
+                        
+                        # Önerileri session_state'e kaydet ve yeniden çalıştır
+                        st.session_state['suggestions'] = suggestions
+                        st.session_state['new_products'] = new_products
+                        # Başarılı kayıt sonrası DF'i sil ki sayfa temizlensin
+                        del st.session_state['irsaliye_df'] 
+                        st.rerun() 
+                    else: 
+                        st.error(f"Kayıt Hatası: {msg}")
+            
+            except Exception as e:
+                # Olası sessiz hataları burada yakala ve kullanıcıya göster
+                st.error(f"Beklenmedik bir hata oluştu: {str(e)}")
+                # Hata oluştuğu için DF'i silme, kullanıcı düzeltsin diye kalsın
+                return
 
     # 3. ÖNERİLERİ GÖSTER VE İŞLE (Kaydetme butonundan sonraki rerunda görünür)
     
     # EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ
     if st.session_state.get('suggestions'):
+        # (Bu kısım değişmedi)
         st.divider()
         st.subheader("💡 Otomatik Eşleştirme Önerisi (Sözlük)")
         
@@ -235,6 +255,7 @@ def render_page(sel_model):
     
     # YENİ FİYAT ANAHTARI ÜRÜNÜ ÖNERİSİ
     if st.session_state.get('new_products'):
+        # (Bu kısım değişmedi)
         st.divider()
         st.subheader("🆕 Fiyat Anahtarı (Stok) Ekleme Önerisi")
         

@@ -6,23 +6,23 @@ import io
 import base64
 import pandas as pd
 from datetime import datetime
-import re
+import re # YENİ EKLENDİ (text_to_dataframe için gerekli)
 
 from modules.utils import (
     get_gspread_client, 
     get_company_list,
-    get_price_database, 
+    get_price_database, # Kota bilgisi için eklendi
     resolve_product_name,
     get_or_create_worksheet, 
     clean_number, 
-    turkish_lower,     
-    add_to_mapping,    
-    add_product_to_price_sheet, 
+    turkish_lower,     # YENİ
+    add_to_mapping,    # YENİ
+    add_product_to_price_sheet, # YENİ
     FILE_STOK,
     PRICE_SHEET_NAME
+    # find_best_match artık resolve_product_name içinde kullanılıyor, burada gerek yok
 )
 
-# --- AI ANALİZ (Mevcut Fonksiyonunuz) ---
 def analyze_receipt_image(image, model_name):
     api_key = st.secrets["GOOGLE_API_KEY"]
     clean_model = model_name if "models/" not in model_name else model_name.replace("models/", "")
@@ -43,21 +43,12 @@ def analyze_receipt_image(image, model_name):
     ÜRÜN ADI | MİKTAR | BİRİM
     """
     
-    payload = {"contents": [{"parts": [
-        {"text": prompt},
-        {"inlineData": {"mimeType": "image/jpeg", "data": base64_image}}
-    ]}]}
-    
+    payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mime_type": "image/jpeg", "data": base64_image}}]}], "safetySettings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]}
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        raw_text = result['candidates'][0]['content']['parts'][0]['text']
-        return True, raw_text
-    except Exception as e:
-        return False, f"AI Analiz Hatası: {e}"
-
-# --- VERİ İŞLEME VE KAYIT ---
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        if response.status_code != 200: return False, f"API Hatası: {response.text}"
+        return True, response.json()['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e: return False, str(e)
 
 def text_to_dataframe(raw_text):
     data = []
@@ -65,70 +56,78 @@ def text_to_dataframe(raw_text):
     for line in lines:
         clean_line = line.replace("*", "").strip()
         if not clean_line or "ÜRÜN ADI" in clean_line.upper(): continue
-        
-        parts = [p.strip() for p in re.split(r'\|| - ', clean_line, maxsplit=2)]
-        
-        if len(parts) >= 3:
+        if "|" in clean_line:
+            parts = [p.strip() for p in clean_line.split('|')]
+            while len(parts) < 3: parts.append("0")
+            
+            # RAW_OCR_ADI sütunu eklendi (Ham metin)
             data.append({
                 "ÜRÜN ADI": parts[0], 
                 "MİKTAR": parts[1], 
                 "BİRİM": parts[2],
-                "RAW_OCR_ADI": parts[0] # Orijinal OCR metni (gizli)
+                "RAW_OCR_ADI": parts[0]
             })
     return pd.DataFrame(data)
 
 def save_receipt_dataframe(df, company, date_obj):
     client = get_gspread_client()
-    # Dönüş değeri: success, msg, mappings, new_products
-    if not client: return False, "Google Sheets Bağlantı Hatası", [], [] 
+    # YENİ DÖNÜŞ DEĞERLERİ: success, msg, mappings, new_products
+    if not client: return False, "Google Sheets Bağlantı Hatası", [], []
     
     date_str = date_obj.strftime("%d.%m.%Y")
     
     try:
         sh = client.open(FILE_STOK) 
         price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
-        price_db = get_price_database(client) 
+        # get_price_database fonksiyonu çağrıldı
+        price_db = get_price_database(client)
         
+        # Firma Sayfası
         ws_company = get_or_create_worksheet(sh, company, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "TUTAR", "İŞLEM TÜRÜ"])
         
+        # Stok Haritası (Eşleştirme için normalleştirilmiş anahtarlar)
         product_map = {turkish_lower(prod): details for prod, details in price_db.get(company, {}).items()}
         
         quota_updates = []
         company_log_rows = []
         msg = []
-        new_mappings_to_suggest = [] 
-        new_products_to_suggest = [] 
+        new_mappings_to_suggest = [] # YENİ: Eşleştirme Sözlüğü önerileri
+        new_products_to_suggest = [] # YENİ: Fiyat Anahtarı ürün önerileri
         
         for index, row in df.iterrows():
-            raw_prod = str(row["RAW_OCR_ADI"])  
-            edited_prod = str(row["ÜRÜN ADI"]) 
+            raw_prod = str(row.get("RAW_OCR_ADI", row["ÜRÜN ADI"]))
+            edited_prod = str(row["ÜRÜN ADI"])
             
-            final_prod = resolve_product_name(edited_prod, client, company) 
+            # Düzeltilmiş ürünü çözümle
+            final_prod = resolve_product_name(edited_prod, client, company)
             
             miktar = clean_number(row["MİKTAR"])
             birim = str(row["BİRİM"]).upper()
             
             fiyat = 0.0
-            key = turkish_lower(final_prod) 
+            key = turkish_lower(final_prod)
             
             if key in product_map:
-                # 1. VAR OLAN ÜRÜN
+                # 1. VAR OLAN ÜRÜN (Kota Düşülür)
                 item = product_map[key]
-                fiyat = item['price']
+                fiyat = item['fiyat'] 
                 
-                new_quota = item['quota'] - miktar
+                new_quota = item['kota'] - miktar
                 
-                quota_updates.append({'range': f'F{item["row_num"]}', 'values': [[new_quota]]}) 
+                # Kota güncelleme (Satır numarası item['row']'dan geliyor)
+                quota_updates.append({'range': f'F{item["row"]}', 'values': [[new_quota]]})
                 msg.append(f"📉 DÜŞÜLDÜ: {final_prod} -> -{miktar} {birim} (Kalan Hak: {new_quota})")
                 
                 # --- EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ ---
+                # Ham OCR metni ile son çözülen standart isim farklıysa
                 if turkish_lower(raw_prod) != turkish_lower(final_prod):
                     new_mappings_to_suggest.append({"raw": raw_prod, "std": final_prod})
                 # -----------------------------------
-
             else:
                 # 2. YENİ ÜRÜN (Fiyat Anahtarına Ekleme Önerisi yapılır)
                 
+                # Bu, kullanıcının girdiği ismin resolve_product_name tarafından çözülemediği anlamına gelir.
+                # Bu durumda, kullanıcıya bu ürünü Fiyat Anahtarına eklemesini öneriyoruz.
                 new_products_to_suggest.append({
                     "product": edited_prod, 
                     "company": company,
@@ -137,24 +136,30 @@ def save_receipt_dataframe(df, company, date_obj):
                 })
                 
                 msg.append(f"⚠️ UYARI: Yeni Ürün **{edited_prod}** bulundu. Fiyat Anahtarına eklenmeli.")
-
+            
             tutar = miktar * fiyat
             
             # Firma Log
             company_log_rows.append([
-                date_str, final_prod, miktar, birim, fiyat, f"{tutar:.2f}", "Tüketim (İrsaliye)"
+                date_str, 
+                final_prod, 
+                miktar, 
+                birim, 
+                fiyat, 
+                f"{tutar:.2f}", 
+                "Mal Kabul Edildi" # İrsaliye İşareti
             ])
         
         if quota_updates: price_ws.batch_update(quota_updates)
         if company_log_rows: ws_company.append_rows(company_log_rows)
     
-        return True, " | ".join(msg), new_mappings_to_suggest, new_products_to_suggest
+        # YENİ DÖNÜŞ DEĞERLERİ
+        return True, " | ".join(msg), new_mappings_to_suggest, new_products_to_suggest 
     except Exception as e: 
         return False, f"Genel Hata: {str(e)}", [], [] 
 
-# --- SAYFA RENDER FONKSİYONU ---
 def render_page(sel_model):
-    st.header("📝 Tüketim Fişi (İrsaliye)")
+    st.header("📝 İrsaliye Girişi (Mal Kabul)")
     st.info("ℹ️ İrsaliye girdiğinde firmanın bakiyesi (stok) **AZALIR**.")
     st.markdown("---")
     
@@ -182,20 +187,23 @@ def render_page(sel_model):
                 else: st.error(f"Okuma Hatası: {raw_text}")
 
     if 'irsaliye_df' in st.session_state:
-        # RAW_OCR_ADI sütununu kullanıcıdan gizle
+        # Kullanıcıya sadece düzenlenebilir sütunları göster
         temp_df_for_editor = st.session_state['irsaliye_df'].drop(columns=['RAW_OCR_ADI'], errors='ignore')
-
+        
         st.subheader("Okunan Ürünleri Kontrol Et ve Gerekirse Düzelt")
         edited_df = st.data_editor(temp_df_for_editor, num_rows="dynamic", use_container_width=True)
         
         if st.button("💾 Kaydet ve Stoktan Düş", type="primary"):
             
+            # Orijinal df'i (RAW_OCR_ADI sütunu ile) kopyala
             df_to_save = st.session_state['irsaliye_df'].copy()
             
+            # Kullanıcının yaptığı düzenlemeleri (RAW_OCR_ADI hariç) geri aktar
             for col in edited_df.columns:
                  df_to_save[col] = edited_df[col] 
 
             with st.spinner("İşleniyor..."):
+                # Yeni dönüş değerlerini yakala
                 success, msg, suggestions, new_products = save_receipt_dataframe(df_to_save, selected_company, selected_date)
                 
                 if success:
@@ -245,7 +253,7 @@ def render_page(sel_model):
                         
                         unique_new_products = product_summary.values()
                         
-                        st.warning(f"Aşağıdaki **{len(unique_new_products)}** ürün Fiyat Anahtarınızda **bulunamadı**. Bu ürünleri borçlanma hakkını kullanmak için eklemek ister misiniz?")
+                        st.warning(f"Aşağıdaki **{len(unique_new_products)}** ürün Fiyat Anahtarınızda **bulunamadı**. Faturası gelmemiş bu ürünleri borçlanma hakkını kullanmak için eklemek ister misiniz?")
                         
                         for p in unique_new_products:
                             st.markdown(f"**Ürün:** *{p['product']}* | **Toplam Miktar:** {p['quota']} {p['unit']}")
@@ -253,6 +261,7 @@ def render_page(sel_model):
                         if st.button("Fiyat Anahtarına Ekle ve Kota Yükle", key="add_new_price_prod", type="danger"):
                             add_results = []
                             for p in unique_new_products:
+                                # Ürünü Fiyat Anahtarına 0 fiyatla, irsaliye miktarıyla ekle
                                 if add_product_to_price_sheet(client, p['product'], selected_company, p['unit'], p['quota']):
                                     add_results.append(f"'{p['product']}' ({p['quota']} {p['unit']}) başarıyla Fiyat Anahtarına eklendi.")
                                 else:

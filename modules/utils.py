@@ -5,19 +5,19 @@ from googleapiclient.discovery import build
 import re
 import difflib
 import requests
-from datetime import datetime
+from datetime import datetime # YENİ EKLENDİ (add_product_to_price_sheet için)
 import pandas as pd
 
 # =========================================================
-# 📂 DOSYA İSİMLERİ 
+# 📂 DOSYA İSİMLERİ (Senin Ekran Görüntüne Göre)
 # =========================================================
 
-FILE_STOK = "Mutfak_Stok_SatinAlma"      
-FILE_FINANS = "Mutfak_Ogrenci_Finans"    
-FILE_MENU = "Mutfak_Menu_Planlama"       
+FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura/İrsaliye
+FILE_FINANS = "Mutfak_Ogrenci_Finans"    # Öğrenci İşleri
+FILE_MENU = "Mutfak_Menu_Planlama"       # Yemek Menüsü
 
 # =========================================================
-# 📑 SAYFA İSİMLERİ 
+# 📑 SAYFA İSİMLERİ
 # =========================================================
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
@@ -26,73 +26,85 @@ SHEET_FINANS_AYARLAR = "FINANS_AYARLAR"
 SHEET_STOK_AYARLAR = "AYARLAR" 
 PRICE_SHEET_NAME = "FIYAT_ANAHTARI"
 MENU_POOL_SHEET_NAME = "YEMEK_HAVUZU"
-MAPPING_SHEET_NAME = "ESLESTIRME_SOZLUGU" # Eklendi
+MAPPING_SHEET_NAME = "ESLESTIRME_SOZLUGU" # YENİ EKLENDİ
 
 # =========================================================
-# 🔐 BAĞLANTILAR VE GÜVENLİK
+# 🔐 BAĞLANTILAR
 # =========================================================
 
 def check_password():
-    """Kullanıcı kimlik doğrulamasını yapar."""
-    # Mevcut şifre kontrolü korunmuştur
-    if st.session_state.get("authenticated", False): 
-        return True
-        
+    if st.session_state.get("authenticated", False): return True
     with st.form("login_form"):
         st.subheader("🔒 Sisteme Giriş")
-        # Güvenlik için şifreyi Streamlit secrets'tan çekiyoruz
-        SECRET_PASSWORD = st.secrets.get("login_password", "1234") 
         password = st.text_input("Şifrenizi Girin:", type="password")
-        
         if st.form_submit_button("Giriş Yap"):
-            if password == SECRET_PASSWORD:
+            if password == st.secrets.get("APP_PASSWORD", "admin"): 
                 st.session_state["authenticated"] = True
                 st.rerun()
-            else:
-                st.error("Yanlış Şifre.")
-                st.session_state["authenticated"] = False
+                return True
+            else: st.error("Yanlış şifre.")
     return False
 
 def get_gspread_client():
-    """Google Sheets bağlantı objesini döndürür."""
     try:
-        creds_json = st.secrets["gcp_service_account"]
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-        client = gspread.authorize(creds)
-        return client
+        # KAPSAM (SCOPE) - Robotun hem Sheets hem Drive yetkisi olsun
+        scope = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        return gspread.authorize(creds)
     except Exception as e:
+        st.error(f"Sheets Bağlantı Hatası: {e}")
         return None
 
-def get_or_create_worksheet(sh, title, cols=10, headers=[]):
-    """Belirtilen isimde bir çalışma sayfası bulur veya oluşturur."""
+# --- DRIVE SERVİSİ (Finans Modülü İçin Geri Geldi) ---
+def get_drive_service():
+    scope = ['https://www.googleapis.com/auth/drive']
     try:
-        ws = sh.worksheet(title)
-        if headers and not ws.row_values(1):
-             ws.update([headers], 'A1')
-        return ws
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
-        if headers:
-             ws.update([headers], 'A1')
-        return ws
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e: return None
 
-def clean_number(value):
-    """Sayıları temizler ve float'a çevirir."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = value.replace('.', '').replace(',', '.').strip()
-        cleaned = re.sub(r'[^\d.]', '', cleaned)
-        try:
-            return float(cleaned)
-        except ValueError:
-            return 0.0
-    return 0.0
+# --- EKSİK OLAN FONKSİYON BU ---
+def find_folder_id(service, folder_name, parent_id=None):
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        if parent_id: query += f" and '{parent_id}' in parents"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        if files: return files[0]['id']
+        return None
+    except: return None
+
+def fetch_google_models():
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        res = requests.get(url)
+        if res.status_code == 200:
+            data = res.json()
+            # Desteklenen modelleri çek
+            return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
+        return []
+    except: return []
 
 # =========================================================
-# ✨ YENİ NORMALİZASYON VE EŞLEŞTİRME FONKSİYONLARI
+# 🛠️ YARDIMCI ARAÇLAR VE YENİ EŞLEŞTİRME FONKSİYONLARI
 # =========================================================
+
+def clean_number(num_str):
+    if not num_str: return 0.0
+    clean = re.sub(r'[^\d.,-]', '', str(num_str))
+    try:
+        if '.' in clean and ',' in clean: clean = clean.replace('.', '').replace(',', '.')
+        elif ',' in clean and '.' not in clean: clean = clean.replace(',', '.')
+        elif '.' in clean and ',' not in clean:
+            parts = clean.split('.')
+            if len(parts) == 2 and len(parts[1]) == 3: clean = clean.replace('.', '') 
+        return float(clean)
+    except: return 0.0
 
 def turkish_lower(text):
     """
@@ -101,42 +113,69 @@ def turkish_lower(text):
     if not isinstance(text, str):
         text = str(text)
         
-    # Türkçe uyumlu küçük harfe çevirme
     text = text.replace('İ', 'i').replace('I', 'ı')
     text = text.lower()
     
-    # Gereksiz karakterleri kaldır
+    # Gereksiz noktalama, binlik ayraç ve sembolleri kaldır
     text = re.sub(r'[^\w\s]', '', text) 
     
     # Fazla boşlukları tek boşluğa indir
     return ' '.join(text.split()).strip()
 
-def find_best_match(target, candidates, cutoff=0.7):
+def standardize_name(text):
+    if not text or len(text.strip()) < 2: return "Genel"
+    cleaned = text.replace("*", "").replace("-", "").strip()
+    return " ".join([word.capitalize() for word in cleaned.split()])
+
+def find_best_match(ocr_text, db_list, cutoff=0.7):
     """Bulanık eşleştirme (fuzzy matching) yapar."""
-    if not candidates:
+    if not db_list:
         return None
     
-    normalized_candidates = {turkish_lower(c): c for c in candidates}
-    normalized_target = turkish_lower(target)
+    # DB listesini normalleştirilmiş anahtarlar ve orijinal değerler olarak hazırla
+    normalized_candidates = {turkish_lower(c): c for c in db_list}
+    
+    # Hedefi normalleştir
+    normalized_target = turkish_lower(ocr_text)
     
     matches = difflib.get_close_matches(normalized_target, normalized_candidates.keys(), n=1, cutoff=cutoff)
     
     if matches:
+        # Normalleştirilmiş anahtardan orijinal aday ismi bul ve döndür
         return normalized_candidates[matches[0]]
     
     return None
 
+def get_or_create_worksheet(sh, title, cols, header):
+    try:
+        # Eğer sayfa varsa döndür
+        for ws in sh.worksheets():
+            if turkish_lower(ws.title) == turkish_lower(title): return ws
+        
+        # Yoksa oluştur
+        ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
+        ws.append_row(header)
+        return ws
+    except Exception as e:
+        if "already exists" in str(e): return sh.worksheet(title)
+        return None
+
 def get_mapping_database(client):
-    """'ESLESTIRME_SOZLUGU' sayfasından eşleşmeleri çeker."""
+    """
+    'ESLESTIRME_SOZLUGU' sayfasından (OCR Metni -> Standart Ürün Adı) haritasını çeker.
+    """
     mapping_db = {}
     try:
         sh = client.open(FILE_STOK)
+        # Eğer sayfa yoksa, otomatik oluştur
         ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
         data = ws.get_all_values()
         
+        # İlk satırı atla (başlıklar)
         for idx, row in enumerate(data):
             if idx == 0: continue
             if len(row) >= 2 and row[0].strip() and row[1].strip():
+                # Ham OCR metnini normalleştirerek anahtar yapıyoruz
                 ocr_key = turkish_lower(row[0].strip()) 
                 std_value = row[1].strip()
                 mapping_db[ocr_key] = std_value
@@ -149,47 +188,81 @@ def add_to_mapping(client, ocr_text, standard_product_name):
     try:
         sh = client.open(FILE_STOK)
         ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
+        # Eşleşmeyi direkt olarak, ham metin ve standart ürün adı olarak ekle
         ws.append_row([ocr_text, standard_product_name])
         return True
     except: return False
 
 def add_product_to_price_sheet(client, product_name, company_name, unit, initial_quota=0.0):
     """
-    Yeni bir ürünü FIYAT_ANAHTARI sayfasına ekler (irsaliyeden borçlandırma için).
+    Yeni bir ürünü (faturası gelmemiş irsaliye kalemi) FIYAT_ANAHTARI sayfasına ekler.
     """
     try:
         sh = client.open(FILE_STOK)
+        # FIYAT_ANAHTARI sayfasının başlıkları (7 sütun)
         ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
         
         today = datetime.now().strftime("%d.%m.%Y")
         
         new_row = [
-            company_name, product_name, "0.00", "₺", today, initial_quota, unit                    
+            company_name,           # TEDARİKÇİ
+            product_name,           # ÜRÜN ADI
+            "0.00",                 # BİRİM FİYAT (Fatura gelmediği için şimdilik 0)
+            "₺",                    # PARA BİRİMİ
+            today,                  # GÜNCELLEME TARİHİ
+            initial_quota,          # KALAN KOTA (İrsaliye ile gelen miktar)
+            unit                    # KOTA BİRİMİ
         ]
         
         ws.append_row(new_row)
         return True
     except Exception as e:
-        st.error(f"Fiyat Anahtarına Ekleme Hatası: {e}")
         return False
         
 # =========================================================
-# ⚙️ MEVCUT VE GÜNCELLENEN FONKSİYONLAR
+# 🏢 FİRMA VE STOK İŞLEMLERİ (FILE_STOK Dosyasında)
 # =========================================================
 
 def get_company_list(client):
-    """Mevcut tedarikçi listesini döndürür."""
     try:
         sh = client.open(FILE_STOK)
-        ws = sh.worksheet(SHEET_STOK_AYARLAR)
+        try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
+        except: 
+            ws = sh.add_worksheet(SHEET_STOK_AYARLAR, 100, 2)
+            ws.update_cell(1, 1, "FİRMA LİSTESİ")
+            return []
         col_values = ws.col_values(1)
         companies = [c.strip() for c in col_values[1:] if c.strip()]
         return sorted(list(set(companies)))
     except: return []
 
+def resolve_product_name(ocr_prod, client, company_name):
+    """
+    Ürün adını sırayla 1) Eşleştirme Sözlüğü ve 2) Bulanık Eşleştirme kullanarak çözer.
+    """
+    
+    clean_prod = ocr_prod.replace("*", "").strip()
+    norm_prod = turkish_lower(clean_prod) 
+
+    try:
+        # 1. A) Eşleştirme Sözlüğünde Ara
+        mapping_db = get_mapping_database(client)
+        if norm_prod in mapping_db:
+            return mapping_db[norm_prod] 
+        
+        # 1. B) Sözlükte Yoksa, Fiyat Veritabanında Bulanık Eşleştirme Yap
+        price_db = get_price_database(client)
+        if company_name in price_db:
+            company_products = list(price_db[company_name].keys())
+            best = find_best_match(clean_prod, company_products, cutoff=0.7)
+            if best: return best
+            
+        # 1. C) Hiçbiri Yoksa, ham metni döndür (kullanıcı manuel düzeltecek)
+        return clean_prod
+    except: 
+        return clean_prod 
 
 def get_price_database(client):
-    """Fiyat Anahtarını (Stok ve Fiyatları) çeker."""
     price_db = {}
     try:
         sh = client.open(FILE_STOK)
@@ -201,45 +274,9 @@ def get_price_database(client):
                 ted = row[0].strip()
                 urn = row[1].strip()
                 fyt = clean_number(row[2])
-                kot = clean_number(row[5]) if len(row) >= 6 else 0.0
-                birim = row[6].strip() if len(row) >= 7 else "ADET"
-                
-                if ted not in price_db:
-                    price_db[ted] = {}
-                
-                price_db[ted][urn] = {
-                    'price': fyt,
-                    'quota': kot,
-                    'unit': birim,
-                    'row_num': idx + 1 
-                }
+                kota = clean_number(row[5]) if len(row) >= 6 else 0.0
+                kb = row[6].strip() if len(row) >= 7 else ""
+                if ted not in price_db: price_db[ted] = {}
+                price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
         return price_db
-    except Exception as e: 
-        return {}
-
-
-def resolve_product_name(ocr_prod, client, company_name):
-    """
-    Ürün adını sırayla 1) Eşleştirme Sözlüğü ve 2) Bulanık Eşleştirme kullanarak çözer.
-    """
-    
-    clean_prod = ocr_prod.replace("*", "").strip()
-    norm_prod = turkish_lower(clean_prod) 
-
-    try:
-        # A) Eşleştirme Sözlüğünde Ara
-        mapping_db = get_mapping_database(client)
-        if norm_prod in mapping_db:
-            return mapping_db[norm_prod] 
-        
-        # B) Sözlükte Yoksa, Fiyat Veritabanında Bulanık Eşleştirme Yap
-        price_db = get_price_database(client)
-        if company_name in price_db:
-            company_products = list(price_db[company_name].keys())
-            best = find_best_match(clean_prod, company_products, cutoff=0.7) 
-            if best: return best
-            
-        # C) Hiçbiri Yoksa, ham metni döndür (kullanıcı manuel düzeltecek)
-        return clean_prod
-    except: 
-        return clean_prod
+    except: return {}

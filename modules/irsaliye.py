@@ -6,21 +6,58 @@ import io
 import base64
 import pandas as pd
 from datetime import datetime
+import re
 
 from modules.utils import (
     get_gspread_client, 
     get_company_list,
+    get_price_database, # Kota düşümü için gerekli (mevcuttu)
     resolve_product_name,
     get_or_create_worksheet, 
     clean_number, 
-    # find_best_match artık resolve_product_name içinde kullanılıyor.
-    turkish_lower,     # <--- YENİ EKLENDİ
-    add_to_mapping,    # <--- YENİ EKLENDİ
+    turkish_lower,     # YENİ
+    add_to_mapping,    # YENİ
+    add_product_to_price_sheet, # YENİ
     FILE_STOK,
     PRICE_SHEET_NAME
 )
 
-# ... (analyze_receipt_image fonksiyonu değişmedi)
+# --- AI ANALİZ (Mevcut Fonksiyonunuz) ---
+def analyze_receipt_image(image, model_name):
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    clean_model = model_name if "models/" not in model_name else model_name.replace("models/", "")
+    
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='JPEG')
+    base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    
+    prompt = """
+    Bu İRSALİYEYİ analiz et.
+    Sadece kalemleri çıkar. Firma ismine veya tarihe bakma.
+    MİKTARLARI yazarken Binlik Ayracı kullanma (1500 yaz).
+    
+    ÇIKTI FORMATI:
+    ÜRÜN ADI | MİKTAR | BİRİM
+    """
+    
+    payload = {"contents": [{"parts": [
+        {"text": prompt},
+        {"inlineData": {"mimeType": "image/jpeg", "data": base64_image}}
+    ]}]}
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        raw_text = result['candidates'][0]['content']['parts'][0]['text']
+        return True, raw_text
+    except Exception as e:
+        return False, f"AI Analiz Hatası: {e}"
+
+# --- VERİ İŞLEME VE KAYIT ---
 
 def text_to_dataframe(raw_text):
     data = []
@@ -33,83 +70,86 @@ def text_to_dataframe(raw_text):
         parts = [p.strip() for p in re.split(r'\|| - ', clean_line, maxsplit=2)]
         
         if len(parts) >= 3:
-            # İrsaliyede fiyat olmaz genelde
             data.append({
                 "ÜRÜN ADI": parts[0], 
                 "MİKTAR": parts[1], 
                 "BİRİM": parts[2],
-                "RAW_OCR_ADI": parts[0] # <--- YENİ EKLENDİ (Orijinal OCR metni)
+                "RAW_OCR_ADI": parts[0] # Orijinal OCR metni (gizli)
             })
     return pd.DataFrame(data)
 
 def save_receipt_dataframe(df, company, date_obj):
     client = get_gspread_client()
-    # Dönüş değerine suggestions (öneriler) eklendi
-    if not client: return False, "Google Sheets Bağlantı Hatası", [] 
+    # Dönüş değerine suggestions (eşleşme önerileri) ve new_products (yeni ürün önerileri) eklendi
+    if not client: return False, "Google Sheets Bağlantı Hatası", [], [] 
     
     date_str = date_obj.strftime("%d.%m.%Y")
     
     try:
         sh = client.open(FILE_STOK) 
         price_ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, [])
-        price_data = price_ws.get_all_values()
+        price_db = get_price_database(client) # Güncel fiyat veritabanını çek
         
+        # Firma Sayfası (Cari Ekstresi)
         ws_company = get_or_create_worksheet(sh, company, 10, ["TARİH", "ÜRÜN ADI", "MİKTAR", "BİRİM", "BİRİM FİYAT", "TUTAR", "İŞLEM TÜRÜ"])
         
-        product_map = {}
-        for idx, row in enumerate(price_data):
-            if idx == 0: continue
-            if len(row) >= 3:
-                db_comp = row[0].strip()
-                db_prod = row[1].strip()
-                if db_comp == company:
-                    # Anahtar küçük harfe çevrildi
-                    product_map[turkish_lower(db_prod)] = { 
-                        "row": idx + 1, 
-                        "quota": clean_number(row[5]) if len(row) >= 6 else 0.0,
-                        "price": clean_number(row[2]) 
-                    }
+        # Sadece ilgili firmanın ürünlerini al, anahtarları normalleştirilmiş olsun
+        product_map = {turkish_lower(prod): details for prod, details in price_db.get(company, {}).items()}
         
         quota_updates = []
         company_log_rows = []
         msg = []
-        new_mappings_to_suggest = [] # Yeni eşleşme önerilerini toplama listesi
+        new_mappings_to_suggest = [] 
+        new_products_to_suggest = [] # <--- YENİ: Fiyat Anahtarına eklenecekler
         
         for index, row in df.iterrows():
-            # Hem ham OCR metnini hem de kullanıcının düzenlediği metni alıyoruz
             raw_prod = str(row["RAW_OCR_ADI"])  
             edited_prod = str(row["ÜRÜN ADI"]) 
             
-            # resolve_product_name, sözlük/bulanık eşleşme sırasıyla çalışır
-            final_prod = resolve_product_name(edited_prod, client, company)
+            # Sözlük/Fuzzy ile çözülen standart isim
+            final_prod = resolve_product_name(edited_prod, client, company) 
             
             miktar = clean_number(row["MİKTAR"])
             birim = str(row["BİRİM"]).upper()
             
-            # Fiyat bul (DB'den)
             fiyat = 0.0
             key = turkish_lower(final_prod) # Karşılaştırma için normalleştirilmiş key kullan
             
             if key in product_map:
+                # 1. VAR OLAN ÜRÜN (Kota Düşülür ve Mapping Önerisi yapılır)
                 item = product_map[key]
                 fiyat = item['price']
                 
                 # Kota düşürme
                 new_quota = item['quota'] - miktar
                 
-                quota_updates.append({'range': f'F{item["row"]}', 'values': [[new_quota]]})
+                # Sütun F (index 5)
+                quota_updates.append({'range': f'F{item["row_num"]}', 'values': [[new_quota]]}) 
                 msg.append(f"📉 DÜŞÜLDÜ: {final_prod} -> -{miktar} {birim} (Kalan Hak: {new_quota})")
                 
-                # --- EŞLEŞTİRME ÖNERİSİ KONTROLÜ ---
-                # Ham OCR metni ile son çözülen standart isim farklıysa (ve ham metin sözlükte yoksa)
+                # --- EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ ---
+                # Ham OCR metni ile son çözülen standart isim farklıysa
                 if turkish_lower(raw_prod) != turkish_lower(final_prod):
-                    # Sözlüğe eklenmesi için öneri olarak kaydet
                     new_mappings_to_suggest.append({"raw": raw_prod, "std": final_prod})
                 # -----------------------------------
 
             else:
-                msg.append(f"⚠️ UYARI: {final_prod} faturası/fiyatı bulunamadı, stoktan düşülemedi.")
-            
+                # 2. YENİ ÜRÜN (Fiyat Anahtarına Ekleme Önerisi yapılır)
+                
+                # Eğer resolve_product_name başarısız olduysa, final_prod, edited_prod'a eşit olacaktır.
+                # Eğer bu ürün hala fiyat listesinde yoksa (ki bu blokta olduğumuza göre yok), 
+                # bu yeni bir ürün demektir.
+                
+                # Yeni ürün önerisi listesine ekle
+                new_products_to_suggest.append({
+                    "product": edited_prod, # Kullanıcının girdiği/düzelttiği standart isim
+                    "company": company,
+                    "unit": birim,
+                    "quota": miktar 
+                })
+                
+                msg.append(f"⚠️ UYARI: Yeni Ürün **{edited_prod}** bulundu. Fiyat Anahtarına eklenmeli.")
+
             tutar = miktar * fiyat
             
             # Firma Log
@@ -122,11 +162,11 @@ def save_receipt_dataframe(df, company, date_obj):
         if company_log_rows: ws_company.append_rows(company_log_rows)
     
         # Başarılı dönüşte önerileri de gönder
-        return True, " | ".join(msg), new_mappings_to_suggest 
+        return True, " | ".join(msg), new_mappings_to_suggest, new_products_to_suggest
     except Exception as e: 
-        # Hata durumunda boş öneri listesi gönder
-        return False, f"Genel Hata: {str(e)}", [] 
+        return False, f"Genel Hata: {str(e)}", [], [] 
 
+# --- SAYFA RENDER FONKSİYONU ---
 def render_page(sel_model):
     st.header("📝 Tüketim Fişi (İrsaliye)")
     st.info("ℹ️ İrsaliye girdiğinde firmanın bakiyesi (stok) **AZALIR**.")
@@ -172,36 +212,32 @@ def render_page(sel_model):
                  df_to_save[col] = edited_df[col] 
 
             with st.spinner("İşleniyor..."):
-                # Yeni dönüş değeri: success, msg, suggestions
-                success, msg, suggestions = save_receipt_dataframe(df_to_save, selected_company, selected_date)
+                # Yeni dönüş değerleri: success, msg, suggestions, new_products
+                success, msg, suggestions, new_products = save_receipt_dataframe(df_to_save, selected_company, selected_date)
                 
                 if success:
                     st.balloons(); st.success("✅ İrsaliye İşlendi!")
                     st.write(msg)
                     
-                    # --- EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ ---
+                    # 1. EŞLEŞTİRME SÖZLÜĞÜ ÖNERİSİ
                     if suggestions:
                         st.divider()
                         st.subheader("💡 Otomatik Eşleştirme Önerisi (Sözlük)")
                         
-                        # Tekil önerileri al (aynı ham metni birden fazla kaydetmemek için)
-                        unique_suggestions = {}
+                        unique_mappings = {}
                         for s in suggestions:
-                            # Normalleştirilmiş ham metni anahtar olarak kullan
                             norm_raw = turkish_lower(s['raw'])
-                            unique_suggestions[norm_raw] = s
+                            unique_mappings[norm_raw] = s
                         
-                        st.info(f"Girilen **{len(unique_suggestions)}** farklı OCR metni, standart ürün isimleriyle eşleşti (manuel/bulanık eşleşme). Bu eşleşmeleri **Sözlüğe ekleyip** bir daha manuel işlememeyi öğrenelim mi?")
+                        st.info(f"Girilen **{len(unique_mappings)}** farklı OCR metni, standart ürün isimleriyle eşleşti. Bunları **Sözlüğe ekleyip** bir daha manuel işlememeyi öğrenelim mi?")
                         
                         # Önerileri liste olarak göster
-                        for s in unique_suggestions.values():
+                        for s in unique_mappings.values():
                             st.markdown(f"**OCR Metni:** *{s['raw']}* $\rightarrow$ **Standart İsim:** **{s['std']}**")
                             
                         if st.button("Sözlüğe Ekle ve Öğren", type="secondary"):
                             mapping_results = []
-                            # Tekil önerileri işleriz
-                            for s in unique_suggestions.values():
-                                # Sözlüğe ekleme fonksiyonunu çağır
+                            for s in unique_mappings.values():
                                 if add_to_mapping(client, s['raw'], s['std']):
                                     mapping_results.append(f"'{s['raw']}' -> '{s['std']}' başarıyla eklendi.")
                                 else:
@@ -209,8 +245,46 @@ def render_page(sel_model):
                             
                             st.success("✅ Tüm eşleştirmeler sözlüğe kaydedildi. Bir dahaki sefere otomatik tanınacaklar.")
                             st.text("\n".join(mapping_results))
+                            st.rerun() # Tekrar tetikleme ile güncel listeyi göster
 
+                    # 2. YENİ FİYAT ANAHTARI ÜRÜNÜ ÖNERİSİ
+                    if new_products:
+                        st.divider()
+                        st.subheader("🆕 Fiyat Anahtarı (Stok) Ekleme Önerisi")
+                        
+                        # Aynı üründen birden fazla varsa miktarını toplayarak tekil ürün listesi oluştur
+                        product_summary = {}
+                        for p in new_products:
+                            key = turkish_lower(p['product'])
+                            if key not in product_summary:
+                                product_summary[key] = p.copy()
+                            else:
+                                product_summary[key]['quota'] += p['quota']
+                        
+                        unique_new_products = product_summary.values()
+                        
+                        st.warning(f"Aşağıdaki **{len(unique_new_products)}** ürün Fiyat Anahtarınızda **bulunamadı**. Bu ürünleri borçlanma hakkını kullanmak için eklemek ister misiniz?")
+                        
+                        for p in unique_new_products:
+                            st.markdown(f"**Ürün:** *{p['product']}* | **Toplam Miktar:** {p['quota']} {p['unit']}")
+                            
+                        if st.button("Fiyat Anahtarına Ekle ve Kota Yükle", key="add_new_price_prod", type="danger"):
+                            add_results = []
+                            for p in unique_new_products:
+                                # Ürünü Fiyat Anahtarına 0 fiyatla, irsaliye miktarıyla ekle
+                                if add_product_to_price_sheet(client, p['product'], selected_company, p['unit'], p['quota']):
+                                    add_results.append(f"'{p['product']}' ({p['quota']} {p['unit']}) başarıyla Fiyat Anahtarına eklendi.")
+                                else:
+                                    add_results.append(f"'{p['product']}' eklenemedi.")
+                            
+                            st.success("✅ Tüm yeni ürünler Fiyat Anahtarına eklendi (Fiyat=0.0₺).")
+                            st.text("\n".join(add_results))
+                            st.rerun() 
+                            
                     # İşlem bitti, session state'i temizle
-                    del st.session_state['irsaliye_df']
+                    if 'irsaliye_df' in st.session_state:
+                         del st.session_state['irsaliye_df']
                     
                 else: st.error(f"Kayıt Hatası: {msg}")
+
+# --- SON ---

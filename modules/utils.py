@@ -5,19 +5,19 @@ from googleapiclient.discovery import build
 import re
 import difflib
 import requests
-from datetime import datetime # YENİ EKLENDİ (add_product_to_price_sheet için)
-import pandas as pd
+from datetime import datetime # YENİ EKLENDİ
+import pandas as pd # YENİ EKLENDİ
 
 # =========================================================
-# 📂 DOSYA İSİMLERİ (Senin Ekran Görüntüne Göre)
+# 📂 DOSYA İSİMLERİ 
 # =========================================================
 
-FILE_STOK = "Mutfak_Stok_SatinAlma"      # Fatura/İrsaliye
-FILE_FINANS = "Mutfak_Ogrenci_Finans"    # Öğrenci İşleri
-FILE_MENU = "Mutfak_Menu_Planlama"       # Yemek Menüsü
+FILE_STOK = "Mutfak_Stok_SatinAlma"      
+FILE_FINANS = "Mutfak_Ogrenci_Finans"    
+FILE_MENU = "Mutfak_Menu_Planlama"       
 
 # =========================================================
-# 📑 SAYFA İSİMLERİ
+# 📑 SAYFA İSİMLERİ 
 # =========================================================
 SHEET_YATILI = "OGRENCI_YATILI"
 SHEET_GUNDUZLU = "OGRENCI_GUNDUZLU"
@@ -47,18 +47,13 @@ def check_password():
 
 def get_gspread_client():
     try:
-        # KAPSAM (SCOPE) - Robotun hem Sheets hem Drive yetkisi olsun
-        scope = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
+        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
         return gspread.authorize(creds)
     except Exception as e:
         st.error(f"Sheets Bağlantı Hatası: {e}")
         return None
 
-# --- DRIVE SERVİSİ (Finans Modülü İçin Geri Geldi) ---
 def get_drive_service():
     scope = ['https://www.googleapis.com/auth/drive']
     try:
@@ -67,7 +62,6 @@ def get_drive_service():
         return build('drive', 'v3', credentials=creds)
     except Exception as e: return None
 
-# --- EKSİK OLAN FONKSİYON BU ---
 def find_folder_id(service, folder_name, parent_id=None):
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
@@ -85,7 +79,6 @@ def fetch_google_models():
         res = requests.get(url)
         if res.status_code == 200:
             data = res.json()
-            # Desteklenen modelleri çek
             return sorted([m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']])
         return []
     except: return []
@@ -116,10 +109,8 @@ def turkish_lower(text):
     text = text.replace('İ', 'i').replace('I', 'ı')
     text = text.lower()
     
-    # Gereksiz noktalama, binlik ayraç ve sembolleri kaldır
     text = re.sub(r'[^\w\s]', '', text) 
     
-    # Fazla boşlukları tek boşluğa indir
     return ' '.join(text.split()).strip()
 
 def standardize_name(text):
@@ -128,54 +119,41 @@ def standardize_name(text):
     return " ".join([word.capitalize() for word in cleaned.split()])
 
 def find_best_match(ocr_text, db_list, cutoff=0.7):
-    """Bulanık eşleştirme (fuzzy matching) yapar."""
-    if not db_list:
-        return None
+    """Bulanık eşleştirme (fuzzy matching) yapar. Cutoff 0.7'ye yükseltildi."""
+    if not db_list: return None
     
-    # DB listesini normalleştirilmiş anahtarlar ve orijinal değerler olarak hazırla
     normalized_candidates = {turkish_lower(c): c for c in db_list}
-    
-    # Hedefi normalleştir
     normalized_target = turkish_lower(ocr_text)
     
     matches = difflib.get_close_matches(normalized_target, normalized_candidates.keys(), n=1, cutoff=cutoff)
     
     if matches:
-        # Normalleştirilmiş anahtardan orijinal aday ismi bul ve döndür
         return normalized_candidates[matches[0]]
     
     return None
 
 def get_or_create_worksheet(sh, title, cols, header):
     try:
-        # Eğer sayfa varsa döndür
         for ws in sh.worksheets():
             if turkish_lower(ws.title) == turkish_lower(title): return ws
-        
-        # Yoksa oluştur
         ws = sh.add_worksheet(title=title, rows=1000, cols=cols)
-        ws.append_row(header)
+        if header: ws.append_row(header)
         return ws
     except Exception as e:
         if "already exists" in str(e): return sh.worksheet(title)
         return None
 
 def get_mapping_database(client):
-    """
-    'ESLESTIRME_SOZLUGU' sayfasından (OCR Metni -> Standart Ürün Adı) haritasını çeker.
-    """
+    """'ESLESTIRME_SOZLUGU' sayfasından (OCR Metni -> Standart Ürün Adı) haritasını çeker."""
     mapping_db = {}
     try:
         sh = client.open(FILE_STOK)
-        # Eğer sayfa yoksa, otomatik oluştur
         ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
         data = ws.get_all_values()
         
-        # İlk satırı atla (başlıklar)
         for idx, row in enumerate(data):
             if idx == 0: continue
             if len(row) >= 2 and row[0].strip() and row[1].strip():
-                # Ham OCR metnini normalleştirerek anahtar yapıyoruz
                 ocr_key = turkish_lower(row[0].strip()) 
                 std_value = row[1].strip()
                 mapping_db[ocr_key] = std_value
@@ -188,30 +166,20 @@ def add_to_mapping(client, ocr_text, standard_product_name):
     try:
         sh = client.open(FILE_STOK)
         ws = get_or_create_worksheet(sh, MAPPING_SHEET_NAME, 2, ["OCR METNİ (Ham)", "STANDART ÜRÜN ADI"])
-        # Eşleşmeyi direkt olarak, ham metin ve standart ürün adı olarak ekle
         ws.append_row([ocr_text, standard_product_name])
         return True
     except: return False
 
 def add_product_to_price_sheet(client, product_name, company_name, unit, initial_quota=0.0):
-    """
-    Yeni bir ürünü (faturası gelmemiş irsaliye kalemi) FIYAT_ANAHTARI sayfasına ekler.
-    """
+    """Yeni bir ürünü (faturası gelmemiş irsaliye kalemi) FIYAT_ANAHTARI sayfasına ekler."""
     try:
         sh = client.open(FILE_STOK)
-        # FIYAT_ANAHTARI sayfasının başlıkları (7 sütun)
         ws = get_or_create_worksheet(sh, PRICE_SHEET_NAME, 7, ["TEDARİKÇİ", "ÜRÜN ADI", "BİRİM FİYAT", "PARA BİRİMİ", "GÜNCELLEME TARİHİ", "KALAN KOTA", "KOTA BİRİMİ"])
         
         today = datetime.now().strftime("%d.%m.%Y")
         
         new_row = [
-            company_name,           # TEDARİKÇİ
-            product_name,           # ÜRÜN ADI
-            "0.00",                 # BİRİM FİYAT (Fatura gelmediği için şimdilik 0)
-            "₺",                    # PARA BİRİMİ
-            today,                  # GÜNCELLEME TARİHİ
-            initial_quota,          # KALAN KOTA (İrsaliye ile gelen miktar)
-            unit                    # KOTA BİRİMİ
+            company_name, product_name, "0.00", "₺", today, initial_quota, unit                    
         ]
         
         ws.append_row(new_row)
@@ -220,10 +188,11 @@ def add_product_to_price_sheet(client, product_name, company_name, unit, initial
         return False
         
 # =========================================================
-# 🏢 FİRMA VE STOK İŞLEMLERİ (FILE_STOK Dosyasında)
+# 🏢 FİRMA VE STOK İŞLEMLERİ
 # =========================================================
 
 def get_company_list(client):
+    # (Mevcut fonksiyonunuz)
     try:
         sh = client.open(FILE_STOK)
         try: ws = sh.worksheet(SHEET_STOK_AYARLAR)
@@ -245,24 +214,25 @@ def resolve_product_name(ocr_prod, client, company_name):
     norm_prod = turkish_lower(clean_prod) 
 
     try:
-        # 1. A) Eşleştirme Sözlüğünde Ara
+        # A) Eşleştirme Sözlüğünde Ara
         mapping_db = get_mapping_database(client)
         if norm_prod in mapping_db:
             return mapping_db[norm_prod] 
         
-        # 1. B) Sözlükte Yoksa, Fiyat Veritabanında Bulanık Eşleştirme Yap
+        # B) Sözlükte Yoksa, Fiyat Veritabanında Bulanık Eşleştirme Yap
         price_db = get_price_database(client)
         if company_name in price_db:
             company_products = list(price_db[company_name].keys())
-            best = find_best_match(clean_prod, company_products, cutoff=0.7)
+            best = find_best_match(clean_prod, company_products, cutoff=0.7) 
             if best: return best
             
-        # 1. C) Hiçbiri Yoksa, ham metni döndür (kullanıcı manuel düzeltecek)
+        # C) Hiçbiri Yoksa, ham metni döndür (kullanıcı manuel düzeltecek)
         return clean_prod
     except: 
         return clean_prod 
 
 def get_price_database(client):
+    # (Mevcut fonksiyonunuz, veri çekme mantığı korundu)
     price_db = {}
     try:
         sh = client.open(FILE_STOK)
@@ -277,6 +247,7 @@ def get_price_database(client):
                 kota = clean_number(row[5]) if len(row) >= 6 else 0.0
                 kb = row[6].strip() if len(row) >= 7 else ""
                 if ted not in price_db: price_db[ted] = {}
+                # Anahtarların isimleri değiştirildi: fiyat->fiyat, kota->kota, row->row
                 price_db[ted][urn] = {"fiyat": fyt, "kota": kota, "birim": kb, "row": idx + 1}
         return price_db
     except: return {}

@@ -53,6 +53,50 @@ def get_dish_meta(dish):
     }
 
 # =========================================================
+# 💾 VERİTABANI İŞLEMLERİ (Eksik Olan Kısım Eklendi)
+# =========================================================
+
+def save_menu_to_sheet(client, df):
+    try:
+        sh = client.open(FILE_MENU)
+        try: ws = sh.worksheet(ACTIVE_MENU_SHEET_NAME)
+        except: ws = sh.add_worksheet(ACTIVE_MENU_SHEET_NAME, 100, 20)
+        ws.clear()
+        ws.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"Kaydetme Hatası: {e}")
+        return False
+
+def load_last_menu(client):
+    try:
+        sh = client.open(FILE_MENU)
+        ws = sh.worksheet(ACTIVE_MENU_SHEET_NAME)
+        data = ws.get_all_records()
+        if data: return pd.DataFrame(data)
+        return None
+    except: return None
+
+def get_full_menu_pool(client):
+    try:
+        sh = client.open(FILE_MENU)
+        ws = sh.worksheet(MENU_POOL_SHEET_NAME)
+        data = ws.get_all_values()
+        if not data: return []
+        header = [h.strip().upper() for h in data[0]]
+        pool = []
+        for row in data[1:]:
+            item = {}
+            while len(row) < len(header): row.append("")
+            for i, col_name in enumerate(header): item[col_name] = row[i].strip()
+            pool.append(item)
+        random.shuffle(pool)
+        return pool
+    except Exception as e:
+        st.error(f"Havuz Okuma Hatası: {e}")
+        return []
+
+# =========================================================
 # 🛡️ GELİŞMİŞ SEÇİCİ (DOMINO STRATEJİSİ - ZORUNLU FIX)
 # =========================================================
 
@@ -100,7 +144,7 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
                 # İsim Engelleme
                 if constraints.get('exclude_names') and safe_str(dish.get('YEMEK ADI')) in constraints['exclude_names']: continue
                 
-                # İçerik Çakışması (BOŞLUK HATASI BURADA DÜZELTİLDİ)
+                # İçerik Çakışması (BOŞLUK HATASI DÜZELTİLDİ)
                 # Sadece meta['tag'] doluysa kontrol et
                 if meta['tag'] and constraints.get('block_content_tags') and meta['tag'] in constraints['block_content_tags']: continue
 
@@ -307,7 +351,7 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
 # 🖥️ ARAYÜZ
 # =========================================================
 def render_page(sel_model):
-    st.header("👨‍🍳 Akıllı Menü - FIRIN KORUMALI (v4.1 Fixed)")
+    st.header("👨‍🍳 Akıllı Menü - KESİN ÇÖZÜM (v5.0)")
     st.markdown("---")
     
     client = get_gspread_client()
@@ -341,7 +385,7 @@ def render_page(sel_model):
         target_meatless = st.slider("Hedef Etsiz Öğün (Aylık)", 0, 30, 12)
 
     if st.button("🚀 Menü Oluştur (Sıfırdan)", type="primary"):
-        with st.spinner("Domino Algoritması Çalışıyor..."):
+        with st.spinner("Menü Oluşturuluyor..."):
             pool = get_full_menu_pool(client)
             if pool:
                 holidays = []
@@ -352,7 +396,7 @@ def render_page(sel_model):
                 
                 if save_menu_to_sheet(client, df_menu):
                     st.session_state['generated_menu'] = df_menu
-                    st.success("İşlem Tamam. ZORUNLU hatası giderildi! ✅")
+                    st.success("İşlem Tamam. (ZORUNLU) hatası tamamen giderildi! ✅")
                     st.rerun()
                 else: st.error("Kaydedilemedi.")
 

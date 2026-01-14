@@ -135,7 +135,7 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
     
     valid_options = []
     for dish in candidates:
-        name = dish['YEMEK ADI']
+        name = dish['YEMEK ADI'].strip()  # ✅ YENİ: strip() eklendi
         name_upper = name.upper()
         
         p_type = dish.get('PROTEIN_TURU', '').strip()
@@ -153,10 +153,13 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
 
         # 1. LIMIT ve ARA
         count_used = len(usage_history.get(name, []))
-        if count_used >= dish['LIMIT']: continue
+        if count_used >= dish['LIMIT']: 
+            continue
         if count_used > 0:
             last_seen_day = usage_history[name][-1]
-            if (current_day_obj.day - last_seen_day) <= dish['ARA']: continue
+            gap = current_day_obj.day - last_seen_day
+            if gap <= dish['ARA']: 
+                continue
         
         # 2. EKİPMAN
         if constraints.get('block_equipment') and dish.get('PISIRME_EKIPMAN') == constraints['block_equipment']: continue
@@ -188,21 +191,32 @@ def select_dish(pool, category, usage_history, current_day_obj, constraints=None
         valid_options.append(dish)
     
     if not valid_options:
+        # ⚠️ UYARI: Geçerli seçenek bulunamadı!
         if candidates: 
             chosen = random.choice(candidates)
-            chosen['YEMEK ADI'] = f"{chosen['YEMEK ADI']} (!)" 
+            chosen['YEMEK ADI'] = f"{chosen['YEMEK ADI']} (!)"
+            
+            # ✅ YENİ: Konsola uyarı yazdır
+            if category == "GECE ATIŞTIRMALIK":
+                st.warning(f"⚠️ {current_day_obj.strftime('%d.%m')} - Gece atıştırmalık için uygun seçenek yok! {chosen['YEMEK ADI']} zorla seçildi.")
+            
             return chosen
         return {"YEMEK ADI": f"---", "PISIRME_EKIPMAN": "", "PROTEIN_TURU": "", "ICERIK_TURU": "", "ALT_TUR": "", "RENK": ""}
     
     # FIRSAT EŞİTLİĞİ
-    never_used = [d for d in valid_options if len(usage_history.get(d['YEMEK ADI'], [])) == 0]
+    never_used = [d for d in valid_options if len(usage_history.get(d['YEMEK ADI'].strip(), [])) == 0]
     if never_used: chosen = random.choice(never_used)
     else: chosen = random.choice(valid_options)
+    
+    # ✅ DEBUG: Belirli yemekler için log (gerekirse aktif et)
+    # if chosen['YEMEK ADI'].strip().upper() in ['SPOONFUL', 'KEK', 'MEYVE']:
+    #     count = len(usage_history.get(chosen['YEMEK ADI'].strip(), []))
+    #     print(f"🔍 {chosen['YEMEK ADI']} seçildi | Gün: {current_day_obj.day} | Kullanım: {count}/{chosen['LIMIT']} | Geçmiş: {usage_history.get(chosen['YEMEK ADI'].strip(), [])}")
         
     return chosen
 
 def record_usage(dish, usage_history, day, global_history):
-    name = dish['YEMEK ADI'].replace(" (!)", "")
+    name = dish['YEMEK ADI'].replace(" (!)", "").strip()  # ✅ YENİ: strip() eklendi
     if name == "---": return
     if name not in usage_history: usage_history[name] = []
     usage_history[name].append(day)
@@ -229,13 +243,28 @@ def build_constraints(base_cons, dish_list_for_colors=[], dish_list_for_carbs=[]
     tags = [get_dish_meta(d)['tag'] for d in all_dishes if get_dish_meta(d)['tag']]
     base_cons['block_content_tags'] = tags
     
-    # Karbonhidrat bloklama
+    # ✅ GÜÇLENDİRİLMİŞ: Karbonhidrat bloklama
     blocked_alts = []
+    carb_count = 0  # Kaç karbonhidrat var?
+    
     for d in dish_list_for_carbs:
         alt = get_dish_meta(d)['alt_tur']
-        if alt in ['HAMUR', 'PATATES']: 
-            blocked_alts.extend(['HAMUR', 'PIRINC', 'BULGUR', 'PATATES']) 
-    if blocked_alts: base_cons['block_alt_types'] = list(set(blocked_alts))
+        if alt in ['HAMUR', 'PATATES', 'PIRINC', 'BULGUR']: 
+            carb_count += 1
+    
+    # Eğer 1+ karbonhidrat varsa, diğerlerini engelle
+    if carb_count >= 1:
+        for d in dish_list_for_carbs:
+            alt = get_dish_meta(d)['alt_tur']
+            if alt in ['HAMUR', 'PATATES']: 
+                blocked_alts.extend(['HAMUR', 'PIRINC', 'BULGUR', 'PATATES'])
+                break
+            elif alt in ['PIRINC', 'BULGUR']:
+                blocked_alts.extend(['HAMUR', 'PIRINC', 'BULGUR', 'PATATES'])
+                break
+    
+    if blocked_alts: 
+        base_cons['block_alt_types'] = list(set(blocked_alts))
     
     return base_cons
 
@@ -299,7 +328,8 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
             corba = select_dish(pool, "ÇORBA", usage_history, current_date, constraints=side_cons, global_history=global_history)
             if corba.get('PISIRME_EKIPMAN') == 'FIRIN': daily_oven_used = True
             
-            yan_cons = build_constraints({"exclude_names": daily_exclude}, [ana, corba], [ana])
+            yan_cons = build_constraints({"exclude_names": daily_exclude}, [ana, corba], [ana, corba])
+            # ✅ DÜZELTİLDİ: ÇORBA da eklendi (Hafta sonu)
             if daily_oven_used: yan_cons['block_equipment'] = 'FIRIN'
             
             # ✅ YENİ: Zorunlu yan yoğurt kontrolü
@@ -375,7 +405,8 @@ def generate_smart_menu(month, year, pool, holidays, ready_snack_days_indices):
             record_usage(shared_corba, usage_history, day, global_history)
             if shared_corba.get('PISIRME_EKIPMAN') == 'FIRIN': daily_oven_used = True
             
-            yan_cons = build_constraints({"exclude_names": daily_exclude}, [ogle_ana, aksam_ana, shared_corba], [ogle_ana, aksam_ana])
+            yan_cons = build_constraints({"exclude_names": daily_exclude}, [ogle_ana, aksam_ana, shared_corba], [ogle_ana, aksam_ana, shared_corba])
+            # ✅ DÜZELTİLDİ: ÇORBA da karbonhidrat kontrolüne eklendi
             if daily_oven_used: yan_cons['block_equipment'] = 'FIRIN'
             
             # ✅ YENİ: Zorunlu yan kontrolü

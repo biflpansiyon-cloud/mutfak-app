@@ -5,6 +5,7 @@ import random
 import io
 import calendar
 
+# --- GEREKLİ MODÜLLER (Sizin utils dosyanızdan) ---
 from modules.utils import (
     get_gspread_client, 
     FILE_MENU,            
@@ -24,7 +25,7 @@ def safe_str(val):
     """Excel'den gelen None/NaN değerlerini güvenli boş stringe çevirir."""
     if val is None: return ""
     s = str(val).strip()
-    if s.lower() == 'nan': return ""  # <-- KRİTİK DÜZELTME BURADA
+    if s.lower() == 'nan': return ""
     return s
 
 def get_unique_key(dish):
@@ -52,11 +53,11 @@ def get_dish_meta(dish):
     }
 
 # =========================================================
-# 🛡️ GELİŞMİŞ SEÇİCİ (DOMINO STRATEJİSİ)
+# 🛡️ GELİŞMİŞ SEÇİCİ (DOMINO STRATEJİSİ - ZORUNLU FIX)
 # =========================================================
 
 def select_dish_strict(pool, category, usage_history, current_day_obj, 
-                       oven_banned=False, # <-- EN KRİTİK DEĞİŞKEN
+                       oven_banned=False, 
                        constraints=None, global_history=None):
     
     if constraints is None: constraints = {}
@@ -64,7 +65,7 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
     # 1. Havuzdan Kategoriye Göre Adayları Al
     candidates = [d for d in pool if safe_str(d.get('KATEGORİ')) == category]
     
-    # Balık Filtresi (Standart)
+    # Balık Filtresi
     if not constraints.get('force_fish'):
         candidates = [d for d in candidates if safe_str(d.get('PROTEIN_TURU')) != 'BALIK']
 
@@ -80,14 +81,10 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
             u_key = get_unique_key(dish)
             
             # --- KIRMIZI ÇİZGİ: FIRIN KURALI ---
-            # Eğer o gün fırın kullanıldıysa (oven_banned=True), Fırın yemeklerini LİSTEDEN SİL.
-            # Bu kural strict_level ne olursa olsun asla esnetilmez.
             if oven_banned and meta['equip'] == 'FIRIN': continue
-            
-            # Eğer kullanıcı özellikle fırını yasakladıysa
             if constraints.get('block_equipment') == 'FIRIN' and meta['equip'] == 'FIRIN': continue
             
-            # --- Seviye 0: Temel Kurallar (Limit, Protein) ---
+            # --- Seviye 0: Temel Kurallar ---
             if strict_level >= 0:
                 # Limit
                 used = usage_history.get(u_key, [])
@@ -103,12 +100,13 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
                 # İsim Engelleme
                 if constraints.get('exclude_names') and safe_str(dish.get('YEMEK ADI')) in constraints['exclude_names']: continue
                 
-                # İçerik Çakışması (Yoğurt)
-                if constraints.get('block_content_tags') and meta['tag'] in constraints['block_content_tags']: continue
+                # İçerik Çakışması (BOŞLUK HATASI BURADA DÜZELTİLDİ)
+                # Sadece meta['tag'] doluysa kontrol et
+                if meta['tag'] and constraints.get('block_content_tags') and meta['tag'] in constraints['block_content_tags']: continue
 
-            # --- Seviye 1: Tercihler (Ekipman Tercihi, Karbonhidrat) ---
+            # --- Seviye 1: Tercihler ---
             if strict_level >= 1:
-                # Bakliyat Arası (Sindirim)
+                # Bakliyat Arası
                 if meta['alt_tur'] == 'BAKLIYAT' and global_history:
                     last = global_history.get('last_legume', -99)
                     if (current_day_obj.day - last) < 3: continue
@@ -116,7 +114,7 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
                 if constraints.get('force_equipment') and meta['equip'] != constraints['force_equipment']: continue
                 if constraints.get('block_alt_types') and meta['alt_tur'] in constraints['block_alt_types']: continue
 
-            # --- Seviye 2: Görsel (Renk) ---
+            # --- Seviye 2: Görsel ---
             if strict_level >= 2:
                 if constraints.get('current_meal_colors') and meta['renk'] == 'KIRMIZI':
                     if constraints['current_meal_colors'].count('KIRMIZI') >= 2: continue
@@ -125,30 +123,23 @@ def select_dish_strict(pool, category, usage_history, current_day_obj,
         return valid
 
     # --- DENEME ZİNCİRİ ---
-    
-    # 1. İdeal Yemek
     final_list = apply_filters(candidates, strict_level=2)
+    if not final_list: final_list = apply_filters(candidates, strict_level=1)
+    if not final_list: final_list = apply_filters(candidates, strict_level=0)
     
-    # 2. Renk ve Bakliyat kuralını boşver
-    if not final_list:
-        final_list = apply_filters(candidates, strict_level=1)
-        
-    # 3. Limitleri zorla (Yemek yoksa limit aşılabilir ama FIRIN ASLA AŞILMAZ)
-    if not final_list:
-        final_list = apply_filters(candidates, strict_level=0)
-    
-    # 4. Hiçbiri olmadıysa (Çok nadir) -> O kategoriden rastgele ama FIRIN OLMAYAN ver
+    # 4. Hiçbiri olmadıysa -> ZORUNLU (Fırınsız)
     if not final_list:
         emergency_pool = [d for d in candidates if not (oven_banned and safe_str(d.get('PISIRME_EKIPMAN')) == 'FIRIN')]
         if emergency_pool:
             chosen = random.choice(emergency_pool)
-            chosen['YEMEK ADI'] = chosen.get('YEMEK ADI', '') + " (ZORUNLU)"
+            # İsim kirliliğini önlemek için sadece bir kez (ZORUNLU) yaz
+            current_name = chosen.get('YEMEK ADI', '')
+            if "(ZORUNLU)" not in current_name:
+                chosen['YEMEK ADI'] = current_name + " (ZORUNLU)"
             return chosen
         else:
-            # Yapacak hiçbir şey yok, elde fırınsız yemek kalmamış
             return {"YEMEK ADI": "---", "PISIRME_EKIPMAN": "YOK", "PROTEIN_TURU": ""}
 
-    # Fırsat Eşitliği
     never_used = [d for d in final_list if len(usage_history.get(get_unique_key(d), [])) == 0]
     if never_used: return random.choice(never_used)
     
@@ -173,7 +164,6 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
     usage_history = {} 
     global_history = {'last_legume': -99}
     
-    # --- BALIK GÜNÜ SEÇİMİ ---
     fish_day = None
     if fish_pref == "Otomatik":
         weekdays = [d for d in range(1, num_days + 1) if datetime(year, month, d).weekday() < 5]
@@ -194,28 +184,23 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
         w_idx = curr_date.weekday()
         w_name = GUNLER_TR[w_idx]
         
-        # Tatil mi?
         if any(h[0] <= curr_date.date() <= h[1] for h in holidays):
             menu_log.append({"TARİH": d_str, "GÜN": f"{w_name} (TATİL)", "KAHVALTI": "-", "ÖĞLE ANA": "-", "GECE": "-"})
             prev_dishes = []
             continue
 
-        # --- GÜNLÜK FIRIN KİLİDİ (SIFIRLANIYOR) ---
         OVEN_LOCKED = False 
-        
-        # Günlük yasaklı yemek isimleri (Dün çıkanlar bugün çıkmasın)
         daily_exclude = prev_dishes.copy()
         
         # 1. KAHVALTI
         k_str = "-"
-        if w_idx in [1, 3, 5, 6]: # Salı, Perş, Cts, Pz
+        if w_idx in [1, 3, 5, 6]:
             kahv = select_dish_strict(pool, "KAHVALTI EKSTRA", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints={"exclude_names": daily_exclude})
             record_usage(kahv, usage_history, day, global_history)
             k_str = kahv.get('YEMEK ADI')
-            # Eğer kahvaltıda fırın çıktıysa, geçmiş olsun, günün kalanı kilitli.
             if safe_str(kahv.get('PISIRME_EKIPMAN')) == 'FIRIN': OVEN_LOCKED = True
 
-        # HEDEF YÖNETİMİ (Etsiz Yemek)
+        # HEDEF YÖNETİMİ
         days_left = num_days - day + 1
         needed = target_meatless_count - meatless_cnt
         force_veg = (needed > 0) and (needed >= days_left - 1)
@@ -223,90 +208,70 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
         is_fish = (day == fish_day)
         is_weekend = (w_idx >= 5)
 
-        # ----------------------------------------------------
-        # ÖĞLE YEMEĞİ PLANLAMA
-        # ----------------------------------------------------
+        # 2. ÖĞLE ANA
         lunch_cons = {"exclude_names": daily_exclude}
-        
         if is_fish: 
              lunch_cons['force_protein_types'] = ['BALIK']
-             # Balıklar için özel işlem
              lunch_ana = select_dish_strict(pool, "ANA YEMEK", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints={"force_fish": True})
         else:
              if force_veg: lunch_cons['force_protein_types'] = ['ETSIZ']
              elif meatless_cnt >= target_meatless_count: lunch_cons['force_protein_types'] = ['KIRMIZI', 'BEYAZ']
-             
              lunch_ana = select_dish_strict(pool, "ANA YEMEK", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints=lunch_cons)
 
         record_usage(lunch_ana, usage_history, day, global_history)
-        
-        # Kritik Kontrol: Öğle yemeği Fırın mı?
         if safe_str(lunch_ana.get('PISIRME_EKIPMAN')) == 'FIRIN': OVEN_LOCKED = True
         
         l_ptype = safe_str(lunch_ana.get('PROTEIN_TURU'))
         if l_ptype == 'ETSIZ' and not is_fish: meatless_cnt += 1
 
-        # ----------------------------------------------------
-        # AKŞAM YEMEĞİ PLANLAMA
-        # ----------------------------------------------------
+        # 3. AKŞAM ANA
         dinner_cons = {"exclude_names": daily_exclude + [lunch_ana.get('YEMEK ADI')]}
-        
-        # Akşam protein dengesi
         if not is_fish:
-            if l_ptype in ['KIRMIZI', 'BEYAZ']: dinner_cons['block_protein_list'] = [l_ptype] # Öğlen tavuksa akşam köfte
+            if l_ptype in ['KIRMIZI', 'BEYAZ']: dinner_cons['block_protein_list'] = [l_ptype]
             if force_veg: dinner_cons['force_protein_types'] = ['ETSIZ']
         else:
-            # Balık günü akşamı normal et/tavuk
             dinner_cons['block_protein_list'] = ['BALIK']
 
-        # SEÇİM (Dikkat: oven_banned=OVEN_LOCKED parametresi fırın kontrolünü yapar)
         dinner_ana = select_dish_strict(pool, "ANA YEMEK", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints=dinner_cons)
         record_usage(dinner_ana, usage_history, day, global_history)
-        
-        # Eğer akşam yemeği fırınsa (ve kilit açık idiyse), şimdi kilitlenir
         if safe_str(dinner_ana.get('PISIRME_EKIPMAN')) == 'FIRIN': OVEN_LOCKED = True
         
         d_ptype = safe_str(dinner_ana.get('PROTEIN_TURU'))
         if d_ptype == 'ETSIZ' and not is_fish: meatless_cnt += 1
 
-        # ----------------------------------------------------
-        # YAN ÜRÜNLER (ÇORBA, YAN, TAMAMLAYICI)
-        # ----------------------------------------------------
-        # Artık OVEN_LOCKED ne durumdaysa ona göre seçilecekler.
-        
-        # Yardımcı constraints builder
+        # --- YAN ÜRÜNLER İÇİN CONSTRAINT HAZIRLAYICI ---
         def build_cons(base, dishes):
+            # RENK
             colors = [get_dish_meta(d)['renk'] for d in dishes if d]
-            tags = [get_dish_meta(d)['tag'] for d in dishes if d]
-            carbs = [get_dish_meta(d)['alt_tur'] for d in dishes if d]
-            
             base['current_meal_colors'] = colors
+            
+            # TAG (BOŞ OLANLARI ALMA - KRİTİK DÜZELTME)
+            tags = [get_dish_meta(d)['tag'] for d in dishes if d]
+            tags = [t for t in tags if t] # Boş stringleri temizle
             base['block_content_tags'] = tags
             
+            # KARBONHİDRAT
+            carbs = [get_dish_meta(d)['alt_tur'] for d in dishes if d]
             blocked_carbs = []
             for c in carbs:
                 if c in ['HAMUR', 'PATATES', 'PIRINC', 'BULGUR']:
                     blocked_carbs.extend(['HAMUR', 'PATATES', 'PIRINC', 'BULGUR'])
             if blocked_carbs: base['block_alt_types'] = list(set(blocked_carbs))
             
-            # Et varsa yanına et koyma
+            # PROTEIN
             if any(get_dish_meta(d)['p_type'] in ['KIRMIZI', 'BEYAZ'] for d in dishes):
                 base['block_protein_list'] = ['KIRMIZI', 'BEYAZ', 'BALIK']
                 
             return base
 
-        # 1. ÇORBA (Ortak veya Ayrı)
-        # Hafta içi ortak çorba
+        # 4. ÇORBA
         soup_cons = build_cons({"exclude_names": daily_exclude}, [lunch_ana, dinner_ana])
-        # Eğer bugün balık varsa, balık günü çorbası fix olabilir (Mercimek) ama biz seçtirelim
         soup = select_dish_strict(pool, "ÇORBA", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints=soup_cons)
         record_usage(soup, usage_history, day, global_history)
         if safe_str(soup.get('PISIRME_EKIPMAN')) == 'FIRIN': OVEN_LOCKED = True
 
-        # 2. YAN YEMEK (Ortak veya Ayrı)
+        # 5. YAN YEMEK
         side_cons = build_cons({"exclude_names": daily_exclude}, [lunch_ana, dinner_ana, soup])
-        
-        # Zorunlu yan kontrolü
         forced_side = lunch_ana.get('ZORUNLU_YAN') or dinner_ana.get('ZORUNLU_YAN')
         if forced_side:
             side = {"YEMEK ADI": forced_side, "PISIRME_EKIPMAN": "TENCERE", "PROTEIN_TURU": ""}
@@ -316,23 +281,17 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
         record_usage(side, usage_history, day, global_history)
         if safe_str(side.get('PISIRME_EKIPMAN')) == 'FIRIN': OVEN_LOCKED = True
 
-        # 3. TAMAMLAYICI
+        # 6. TAMAMLAYICI
         tamm_cons = build_cons({"exclude_names": daily_exclude}, [lunch_ana, dinner_ana, soup, side])
         tamm = select_dish_strict(pool, "TAMAMLAYICI", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints=tamm_cons)
         record_usage(tamm, usage_history, day, global_history)
 
-        # 4. GECE
+        # 7. GECE
         snack_cons = {"exclude_names": daily_exclude}
         if w_idx in ready_snack_days_indices: snack_cons['force_equipment'] = 'HAZIR'
-        
-        # Gece için fırın yasağı (Günün özeti)
         snack = select_dish_strict(pool, "GECE ATIŞTIRMALIK", usage_history, curr_date, oven_banned=OVEN_LOCKED, constraints=snack_cons)
         record_usage(snack, usage_history, day, global_history)
 
-        # KAYIT (Hafta sonu mantığı basit tutuldu, öğle/akşam ayrımı yerine ortak yanlar kullanıldı, istenirse ayrılabilir)
-        # Hafta sonu için 'ayrı yan yemek' isteniyorsa burası if is_weekend ile ayrılabilir.
-        # Şimdilik bütçe dostu olması için hafta sonu da ortak yan yemek/çorba kullandım.
-        
         menu_log.append({
             "TARİH": d_str, "GÜN": w_name, "KAHVALTI": k_str,
             "ÖĞLE ÇORBA": soup.get('YEMEK ADI'), "ÖĞLE ANA": lunch_ana.get('YEMEK ADI'), "ÖĞLE YAN": side.get('YEMEK ADI'), "ÖĞLE TAMM": tamm.get('YEMEK ADI'),
@@ -340,59 +299,15 @@ def generate_menu_v4(month, year, pool, holidays, ready_snack_days_indices, fish
             "GECE": f"Çay/Kahve + {snack.get('YEMEK ADI')}"
         })
         
-        # Sonraki güne aktarılacak yasaklılar
         prev_dishes = [soup.get('YEMEK ADI'), lunch_ana.get('YEMEK ADI'), dinner_ana.get('YEMEK ADI'), side.get('YEMEK ADI'), tamm.get('YEMEK ADI')]
 
     return pd.DataFrame(menu_log)
 
 # =========================================================
-# 💾 VERİTABANI İŞLEMLERİ (Aynı)
-# =========================================================
-def save_menu_to_sheet(client, df):
-    try:
-        sh = client.open(FILE_MENU)
-        try: ws = sh.worksheet(ACTIVE_MENU_SHEET_NAME)
-        except: ws = sh.add_worksheet(ACTIVE_MENU_SHEET_NAME, 100, 20)
-        ws.clear()
-        ws.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
-        return True
-    except Exception as e:
-        st.error(f"Kaydetme Hatası: {e}")
-        return False
-
-def load_last_menu(client):
-    try:
-        sh = client.open(FILE_MENU)
-        ws = sh.worksheet(ACTIVE_MENU_SHEET_NAME)
-        data = ws.get_all_records()
-        if data: return pd.DataFrame(data)
-        return None
-    except: return None
-
-def get_full_menu_pool(client):
-    try:
-        sh = client.open(FILE_MENU)
-        ws = sh.worksheet(MENU_POOL_SHEET_NAME)
-        data = ws.get_all_values()
-        if not data: return []
-        header = [h.strip().upper() for h in data[0]]
-        pool = []
-        for row in data[1:]:
-            item = {}
-            while len(row) < len(header): row.append("")
-            for i, col_name in enumerate(header): item[col_name] = row[i].strip()
-            pool.append(item)
-        random.shuffle(pool)
-        return pool
-    except Exception as e:
-        st.error(f"Havuz Okuma Hatası: {e}")
-        return []
-
-# =========================================================
 # 🖥️ ARAYÜZ
 # =========================================================
 def render_page(sel_model):
-    st.header("👨‍🍳 Akıllı Menü - FIRIN KORUMALI (v4.0)")
+    st.header("👨‍🍳 Akıllı Menü - FIRIN KORUMALI (v4.1 Fixed)")
     st.markdown("---")
     
     client = get_gspread_client()
@@ -437,7 +352,7 @@ def render_page(sel_model):
                 
                 if save_menu_to_sheet(client, df_menu):
                     st.session_state['generated_menu'] = df_menu
-                    st.success("İşlem Tamam. Fırın çakışması yok! ✅")
+                    st.success("İşlem Tamam. ZORUNLU hatası giderildi! ✅")
                     st.rerun()
                 else: st.error("Kaydedilemedi.")
 

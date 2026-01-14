@@ -217,8 +217,15 @@ def build_constraints(base_cons, dish_list_for_colors=[], dish_list_for_carbs=[]
     colors = [get_dish_meta(d)['renk'] for d in dish_list_for_colors if get_dish_meta(d)['renk']]
     base_cons['current_meal_colors'] = colors
     
-    # ✅ YENİ: İki listeyi birleştir - tüm yemeklerin tag'lerini al
-    all_dishes = list(set(dish_list_for_colors + dish_list_for_carbs))
+    # ✅ YENİ: İki listeyi birleştir - tüm yemeklerin tag'lerini al (duplicate'ları önlemek için)
+    all_dishes = []
+    seen_names = set()
+    for d in dish_list_for_colors + dish_list_for_carbs:
+        dish_name = d.get('YEMEK ADI', '')
+        if dish_name and dish_name not in seen_names:
+            all_dishes.append(d)
+            seen_names.add(dish_name)
+    
     tags = [get_dish_meta(d)['tag'] for d in all_dishes if get_dish_meta(d)['tag']]
     base_cons['block_content_tags'] = tags
     

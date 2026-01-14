@@ -21,9 +21,11 @@ YOGURT_KEYWORDS = ["YAYLA", "YOĞURT", "DÜĞÜN", "CACIK", "AYRAN", "HAYDARİ",
 # =========================================================
 
 def safe_str(val):
-    """Excel'den gelen None değerlerini güvenli stringe çevirir."""
+    """Excel'den gelen None/NaN değerlerini güvenli boş stringe çevirir."""
     if val is None: return ""
-    return str(val).strip()
+    s = str(val).strip()
+    if s.lower() == 'nan': return ""  # <-- KRİTİK DÜZELTME BURADA
+    return s
 
 def get_unique_key(dish):
     """Yemek takibi için benzersiz anahtar."""

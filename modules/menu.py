@@ -98,6 +98,9 @@ def select_dish_smart(pool, category, usage_history, current_day_obj, constraint
     if not options:
         options = filter_candidates(candidates, strict_level=0)
         # Not: Burada isimleri (!) ile işaretleyebiliriz ama gerek yok, yemek çıksın yeter.
+            # Uyarı ekle ki listede belli olsun
+        for opt in options:
+            opt['YEMEK ADI'] = f"{opt['YEMEK ADI']} (KOTADISI)"
 
     # 4. ACİL DURUM (Fırın kuralını bile yık - Aç kalmaktan iyidir)
     if not options:

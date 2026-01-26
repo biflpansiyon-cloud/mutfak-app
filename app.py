@@ -39,7 +39,7 @@ with st.sidebar:
     st.divider()
     
     # Model Seçimi
-    favorite_models = ["models/gemini-2.5-flash", "models/gemini-exp-1206", "models/gemini-1.5-flash"]
+    favorite_models = ["models/gemma-3-27b", "models/gemini-2.5-flash", "models/gemini-exp-1206", "models/gemini-1.5-flash"]
     
     if st.button("🔄 Modelleri Güncelle"):
         fetched = fetch_google_models()

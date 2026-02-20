@@ -535,6 +535,131 @@ def record_usage(dish: Dict, usage_history: Dict, day: int, global_history: Dict
     if meta['alt_tur'] == 'BAKLIYAT':
         global_history['last_legume'] = day
 
+# ========================================================= 
+# 📊 YEMEK İSTATİSTİKLERİ BÖLÜMÜ
+# =========================================================
+
+def compute_meal_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Menü DataFrame'inden öğün bazlı yemek sayımı yapar.
+    Kahvaltı hariç: Öğle (ÇORBA, ANA, YAN, TAMM), Akşam (ÇORBA, ANA, YAN, TAMM), Gece.
+    """
+    ogle_cols  = ["ÖĞLE ÇORBA", "ÖĞLE ANA", "ÖĞLE YAN", "ÖĞLE TAMM"]
+    aksam_cols = ["AKŞAM ÇORBA", "AKŞAM ANA", "AKŞAM YAN", "AKŞAM TAMM"]
+    gece_cols  = ["GECE"]
+
+    counts: Dict[str, Dict[str, int]] = defaultdict(lambda: {"ÖĞLE": 0, "AKŞAM": 0, "GECE": 0})
+
+    for _, row in df.iterrows():
+        gun = str(row.get("GÜN", ""))
+        if "TATİL" in gun:
+            continue  # Tatil günlerini atla
+
+        for col in ogle_cols:
+            if col in df.columns:
+                val = clean_dish_name(safe_str(row.get(col, "")))
+                if val and val not in ["-", "---", "--- (GÜN YASAĞI)"]:
+                    counts[val]["ÖĞLE"] += 1
+
+        for col in aksam_cols:
+            if col in df.columns:
+                val = clean_dish_name(safe_str(row.get(col, "")))
+                if val and val not in ["-", "---", "--- (GÜN YASAĞI)"]:
+                    counts[val]["AKŞAM"] += 1
+
+        for col in gece_cols:
+            if col in df.columns:
+                raw = safe_str(row.get(col, ""))
+                # "Çay/Kahve + YEMEK ADI" formatından yemeği çıkar
+                if "+" in raw:
+                    val = clean_dish_name(raw.split("+", 1)[1].strip())
+                else:
+                    val = clean_dish_name(raw)
+                if val and val not in ["-", "---"]:
+                    counts[val]["GECE"] += 1
+
+    if not counts:
+        return pd.DataFrame()
+
+    rows = []
+    for yemek, oguns in counts.items():
+        toplam = oguns["ÖĞLE"] + oguns["AKŞAM"] + oguns["GECE"]
+        rows.append({
+            "YEMEK ADI": yemek,
+            "ÖĞLE": oguns["ÖĞLE"],
+            "AKŞAM": oguns["AKŞAM"],
+            "GECE": oguns["GECE"],
+            "TOPLAM": toplam
+        })
+
+    stats_df = pd.DataFrame(rows).sort_values("TOPLAM", ascending=False).reset_index(drop=True)
+    return stats_df
+
+
+def render_stats_tab(df: pd.DataFrame):
+    """İstatistik sekmesini çizer"""
+    st.subheader("📊 Aylık Yemek Kullanım İstatistikleri")
+    st.caption("Kahvaltı hariç; Öğle, Akşam ve Gece atıştırmalıkları bazında kaç kez çıktığı gösterilmektedir.")
+
+    stats_df = compute_meal_stats(df)
+
+    if stats_df.empty:
+        st.info("İstatistik oluşturmak için önce bir menü üretin.")
+        return
+
+    # Filtre
+    col_f1, col_f2 = st.columns([2, 1])
+    with col_f1:
+        search = st.text_input("🔍 Yemek Ara", placeholder="örn: mercimek")
+    with col_f2:
+        min_count = st.number_input("Min. tekrar sayısı", min_value=1, value=1, step=1)
+
+    filtered = stats_df[stats_df["TOPLAM"] >= min_count]
+    if search:
+        filtered = filtered[filtered["YEMEK ADI"].str.contains(search, case=False, na=False)]
+
+    st.markdown(f"**{len(filtered)} yemek** listeleniyor")
+
+    # Renk kodlaması: çok tekrar edenleri vurgula
+    def color_total(val):
+        if val >= 4:
+            return "background-color: #ffcccc"  # Kırmızı - fazla tekrar
+        elif val == 3:
+            return "background-color: #fff3cd"  # Sarı - dikkat
+        elif val == 2:
+            return "background-color: #d4edda"  # Yeşil - normal
+        return ""
+
+    styled = filtered.style.applymap(color_total, subset=["TOPLAM"])
+    st.dataframe(styled, use_container_width=True, height=500)
+
+    # Özet metrikler
+    st.divider()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Farklı Yemek Sayısı", len(stats_df))
+    m2.metric("En Çok Tekrar Eden", 
+              stats_df.iloc[0]["YEMEK ADI"] if not stats_df.empty else "-",
+              delta=f"{stats_df.iloc[0]['TOPLAM']}x" if not stats_df.empty else "")
+    m3.metric("3+ Kez Çıkan Yemek", int((stats_df["TOPLAM"] >= 3).sum()))
+    m4.metric("Tek Seferlik Yemek", int((stats_df["TOPLAM"] == 1).sum()))
+
+    # Kategori bazlı dağılım (Öğle vs Akşam)
+    st.divider()
+    st.markdown("#### Öğün Dağılımı Karşılaştırması")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown("🍽️ **En çok öğle çıkanlar**")
+        top_ogle = stats_df.nlargest(5, "ÖĞLE")[["YEMEK ADI", "ÖĞLE"]]
+        st.dataframe(top_ogle, hide_index=True, use_container_width=True)
+    with col_b:
+        st.markdown("🌙 **En çok akşam çıkanlar**")
+        top_aksam = stats_df.nlargest(5, "AKŞAM")[["YEMEK ADI", "AKŞAM"]]
+        st.dataframe(top_aksam, hide_index=True, use_container_width=True)
+    with col_c:
+        st.markdown("🌙 **En çok gece çıkanlar**")
+        top_gece = stats_df.nlargest(5, "GECE")[["YEMEK ADI", "GECE"]]
+        st.dataframe(top_gece, hide_index=True, use_container_width=True)
+
 # =========================================================
 # 📅 GURME PLANLAMA DÖNGÜSÜ
 # =========================================================
@@ -885,11 +1010,14 @@ def render_page(sel_model):
     
     # Mevcut menüyü göster
     if 'generated_menu' in st.session_state:
-        st.divider()
+    st.divider()
+    
+    tab1, tab2 = st.tabs(["📋 Menü", "📊 İstatistikler"])
+    
+    with tab1:
         st.subheader("📋 Oluşturulan Menü")
-        
-        # Zorunlu sayısını göster
         df = st.session_state['generated_menu']
+        
         zorunlu_count = 0
         for col in df.columns:
             if col not in ['TARİH', 'GÜN']:
@@ -900,16 +1028,13 @@ def render_page(sel_model):
         else:
             st.success("🎉 Tüm yemekler gurme kurallara uygun seçildi!")
         
-        # Düzenlenebilir tablo
         edited = st.data_editor(
             st.session_state['generated_menu'],
             use_container_width=True,
             height=600
         )
         
-        # Kaydet ve İndir butonları
         col_btn1, col_btn2 = st.columns(2)
-        
         with col_btn1:
             if st.button("💾 Değişiklikleri Kaydet", use_container_width=True):
                 if save_menu_to_sheet(client, edited):
@@ -919,41 +1044,22 @@ def render_page(sel_model):
                     st.error("❌ Kayıt başarısız!")
         
         with col_btn2:
-            # Excel indirme
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 edited.to_excel(writer, index=False, sheet_name='Menü')
-                
-                # Excel formatlaması
                 workbook = writer.book
                 worksheet = writer.sheets['Menü']
-                
-                # Header formatı
                 header_format = workbook.add_format({
-                    'bold': True,
-                    'bg_color': '#4CAF50',
-                    'font_color': 'white',
-                    'border': 1
+                    'bold': True, 'bg_color': '#4CAF50',
+                    'font_color': 'white', 'border': 1
                 })
-                
-                # Hücre formatı
-                cell_format = workbook.add_format({
-                    'border': 1,
-                    'text_wrap': True,
-                    'valign': 'vcenter'
-                })
-                
-                # Sütun genişlikleri
-                worksheet.set_column('A:A', 12)  # Tarih
-                worksheet.set_column('B:B', 15)  # Gün
-                worksheet.set_column('C:K', 25)  # Yemekler
-                
-                # Header'ları formatla
+                cell_format = workbook.add_format({'border': 1, 'text_wrap': True, 'valign': 'vcenter'})
+                worksheet.set_column('A:A', 12)
+                worksheet.set_column('B:B', 15)
+                worksheet.set_column('C:K', 25)
                 for col_num, value in enumerate(edited.columns.values):
                     worksheet.write(0, col_num, value, header_format)
-            
             buffer.seek(0)
-            
             st.download_button(
                 label="📥 Excel Olarak İndir",
                 data=buffer,
@@ -961,3 +1067,6 @@ def render_page(sel_model):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+    
+    with tab2:
+        render_stats_tab(st.session_state['generated_menu'])

@@ -608,6 +608,27 @@ def generate_gourmet_menu(month, year, pool, holidays, ready_snack_indices, fish
     meatless_cnt = 0
     prev_dishes = []
 
+    # Katı dönüşümlü mod: hedef == aktif gün sayısı ise her güne tam 1 etsiz öğün koy
+    active_days = sum(
+        1 for d in range(1, num_days + 1)
+        if not any(h[0] <= datetime(year, month, d).date() <= h[1] for h in holidays)
+    )
+    strict_alternating = (target_meatless == active_days)
+
+    # Dönüşümlü modda hangi öğünün etsiz olacağını önceden belirle:
+    # Çift günler → öğle etsiz, tek günler → akşam etsiz (dönüşümlü dağılım)
+    strict_meatless_at_lunch: Dict[int, bool] = {}
+    if strict_alternating:
+        toggle = True
+        for d in range(1, num_days + 1):
+            curr = datetime(year, month, d)
+            if any(h[0] <= curr.date() <= h[1] for h in holidays):
+                continue
+            if d == fish_day:
+                continue  # Balık günü kurala dahil edilmez
+            strict_meatless_at_lunch[d] = toggle
+            toggle = not toggle
+
     for day in range(1, num_days + 1):
         curr_date = datetime(year, month, day)
         d_str = curr_date.strftime("%d.%m.%Y")
@@ -652,10 +673,15 @@ def generate_gourmet_menu(month, year, pool, holidays, ready_snack_indices, fish
                 OVEN_LOCKED = True
 
         days_left = num_days - day + 1
-        # Kalan etsiz hedefin kalan güne oranı >= 0.4 ise etsiz zorla
-        # (Eskiden sadece son anlarda tetikleniyordu, şimdi ay boyuna dengeli dağılıyor)
         meatless_remaining = target_meatless - meatless_cnt
-        force_veg = meatless_remaining > 0 and (meatless_remaining / days_left) >= 0.4
+
+        if strict_alternating and day in strict_meatless_at_lunch:
+            # Katı mod: bu günün hangi öğününün etsiz olduğu önceden belirlendi
+            force_veg = strict_meatless_at_lunch[day]          # öğle için
+            force_veg_evening = not strict_meatless_at_lunch[day]  # akşam için
+        else:
+            force_veg = meatless_remaining > 0 and (meatless_remaining / days_left) >= 0.4
+            force_veg_evening = force_veg
 
         def plan_meal_set(is_fish_meal=False):
             nonlocal OVEN_LOCKED, meatless_cnt
@@ -664,6 +690,12 @@ def generate_gourmet_menu(month, year, pool, holidays, ready_snack_indices, fish
 
             if is_fish_meal:
                 a_cons['force_fish'] = True
+            elif strict_alternating and day in strict_meatless_at_lunch:
+                # Katı mod: öğle için önceden belirlenen role uygula
+                if force_veg:
+                    a_cons['force_protein_types'] = ['ETSİZ']
+                else:
+                    a_cons['force_protein_types'] = ['KIRMIZI', 'BEYAZ']
             elif force_veg:
                 a_cons['force_protein_types'] = ['ETSİZ']
             elif meatless_cnt >= target_meatless:
@@ -751,9 +783,15 @@ def generate_gourmet_menu(month, year, pool, holidays, ready_snack_indices, fish
                 'exclude_names': daily_exclude + [safe_str(o_ana.get('YEMEK ADI'))]
             }
 
-            # Akşam yemeğine de etsiz/etli kısıt uygula (öğle ile aynı mantık)
+            # Akşam yemeğine de etsiz/etli kısıt uygula
             if not is_f:
-                if force_veg:
+                if strict_alternating and day in strict_meatless_at_lunch:
+                    # Katı mod: öğle etsiz ise akşam etli, öğle etli ise akşam etsiz
+                    if force_veg_evening:
+                        a_cons['force_protein_types'] = ['ETSİZ']
+                    else:
+                        a_cons['force_protein_types'] = ['KIRMIZI', 'BEYAZ']
+                elif force_veg:
                     a_cons['force_protein_types'] = ['ETSİZ']
                 elif meatless_cnt >= target_meatless:
                     a_cons['force_protein_types'] = ['KIRMIZI', 'BEYAZ']

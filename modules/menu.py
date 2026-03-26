@@ -207,9 +207,11 @@ class ConstraintManager:
             # force_protein_types ve force_fish hard limit sayılır — gevşetme ezip geçemez
             'force_protein_types': base_constraints.get('force_protein_types'),
             'force_fish': base_constraints.get('force_fish', False),
+            # İçerik çakışması da hard limit — YOGURT yanına YOGURT gelmemeli
+            'block_content_tags': base_constraints.get('block_content_tags') or None,
         }
-        # None olan anahtarları temizle
-        level1 = {k: v for k, v in level1.items() if v is not None and v is not False}
+        # None/False/boş liste olan anahtarları temizle
+        level1 = {k: v for k, v in level1.items() if v is not None and v is not False and v != []}
         levels.append(level1)
 
         return levels

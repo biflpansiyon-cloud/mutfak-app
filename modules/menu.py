@@ -903,10 +903,14 @@ def generate_gourmet_menu(month, year, pool, holidays, ready_snack_indices, fish
 
             a_corba, a_yan, a_tamm = o_corba, o_yan, o_tamm
 
+        # Gece atıştırmalık fırın yasağı: yalnızca akşam anası fırın kullandıysa engelle.
+        # Öğle fırın yemeği geceyi kısıtlamaz.
+        evening_oven_used = (get_dish_meta(a_ana).get('equip', '') == 'FIRIN')
         s_cons = {
-            'oven_banned': OVEN_LOCKED,
+            'oven_banned': evening_oven_used,
             'exclude_names': daily_exclude
         }
+        
         if w_idx in ready_snack_indices:
             s_cons['force_equipment'] = 'HAZIR'
 

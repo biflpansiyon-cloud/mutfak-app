@@ -597,7 +597,7 @@ def render_stats_tab(df: pd.DataFrame):
             return "background-color: #d4edda"
         return ""
 
-    styled = filtered.style.applymap(color_total, subset=["TOPLAM"])
+    styled = filtered.style.map(color_total, subset=["TOPLAM"])
     st.dataframe(styled, use_container_width=True, height=500)
 
     st.divider()

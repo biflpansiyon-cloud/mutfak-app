@@ -589,17 +589,17 @@ def render_stats_tab(df: pd.DataFrame):
     st.markdown(f"**{len(filtered)} yemek** listeleniyor")
 
     def color_total(val):
-    try:
-        v = int(val)
-    except (ValueError, TypeError):
+        try:
+            v = int(val)
+        except (ValueError, TypeError):
+            return ""
+        if v >= 4:
+            return "background-color: #ffcccc"
+        elif v == 3:
+            return "background-color: #fff3cd"
+        elif v == 2:
+            return "background-color: #d4edda"
         return ""
-    if v >= 4:
-        return "background-color: #ffcccc"
-    elif v == 3:
-        return "background-color: #fff3cd"
-    elif v == 2:
-        return "background-color: #d4edda"
-    return ""
 
     styled = filtered.style.map(color_total, subset=["TOPLAM"])
     st.dataframe(styled, use_container_width=True, height=500)
